@@ -1675,6 +1675,58 @@ pub struct ThreadReadResponse {
     pub thread: Thread,
 }
 
+/// Read-only attestation that compares user-visible text messages in persisted
+/// thread history with the persisted items used to reconstruct latest model context.
+///
+/// The response deliberately contains fingerprints and counters only. It never
+/// returns model context items, reasoning, tool payloads, or message text.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadContextAttestParams {
+    pub thread_id: String,
+    /// Optional SHA-256 fingerprint of one visible text message.
+    ///
+    /// Fingerprints use SHA-256 over `role + NUL + text`, where role is
+    /// `user` or `assistant` and text is the newline-joined visible text
+    /// content of the response message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadContextFingerprint {
+    pub visible_text_message_count: u64,
+    pub visible_text_messages_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_visible_text_message_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadContextAttestResponse {
+    pub thread_id: String,
+    pub history_mode: ThreadHistoryMode,
+    pub persisted_history: ThreadContextFingerprint,
+    pub latest_model_context: ThreadContextFingerprint,
+    pub exact_visible_text_match: bool,
+    pub latest_visible_text_message_matches: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor_in_persisted_history: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub anchor_in_latest_model_context: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

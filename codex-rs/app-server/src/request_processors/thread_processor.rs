@@ -21,8 +21,11 @@ use codex_protocol::SanitizedGitUrl;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::PersistContext;
+use sha2::Digest;
+use sha2::Sha256;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -31,6 +34,72 @@ const THREAD_ROLLBACK_DEPRECATION_SUMMARY: &str =
     "thread/rollback is deprecated and will be removed soon";
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
+
+fn visible_text_message_fingerprints(items: &[RolloutItem]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let RolloutItem::ResponseItem(envelope) = item else {
+                return None;
+            };
+            let ResponseItem::Message {
+                role, content, ..
+            } = &envelope.item
+            else {
+                return None;
+            };
+            if role != "user" && role != "assistant" {
+                return None;
+            }
+
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text.as_str())
+                    }
+                    ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                return None;
+            }
+
+            let mut hasher = Sha256::new();
+            hasher.update(role.as_bytes());
+            hasher.update([0]);
+            hasher.update(text.as_bytes());
+            Some(format!("{:x}", hasher.finalize()))
+        })
+        .collect()
+}
+
+fn visible_context_fingerprint(fingerprints: &[String]) -> ThreadContextFingerprint {
+    let mut hasher = Sha256::new();
+    for fingerprint in fingerprints {
+        hasher.update(fingerprint.as_bytes());
+        hasher.update([0]);
+    }
+    ThreadContextFingerprint {
+        visible_text_message_count: fingerprints.len() as u64,
+        visible_text_messages_sha256: format!("{:x}", hasher.finalize()),
+        latest_visible_text_message_sha256: fingerprints.last().cloned(),
+    }
+}
+
+fn normalize_context_anchor(anchor: Option<String>) -> Result<Option<String>, JSONRPCErrorError> {
+    let Some(anchor) = anchor else {
+        return Ok(None);
+    };
+    let anchor = anchor.trim().to_ascii_lowercase();
+    if anchor.len() != 64 || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid_request(
+            "anchorSha256 must be exactly 64 hexadecimal characters",
+        ));
+    }
+    Ok(Some(anchor))
+}
 
 async fn stage_pending_project_metadata(
     thread_manager: &ThreadManager,
@@ -870,6 +939,78 @@ impl ThreadRequestProcessor {
             .await;
         }
         Ok(Some(response.into()))
+    }
+
+    pub(crate) async fn thread_context_attest(
+        &self,
+        params: ThreadContextAttestParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let thread_id = ThreadId::from_string(&params.thread_id)
+            .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
+        let anchor_sha256 = normalize_context_anchor(params.anchor_sha256)?;
+
+        let stored_thread = self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await
+            .map_err(thread_store_resume_read_error)?;
+        let history_mode = stored_thread.history_mode.into();
+        let persisted_items = stored_thread
+            .history
+            .ok_or_else(|| internal_error("thread store did not return persisted history"))?
+            .items;
+
+        let latest_model_context = self
+            .thread_store
+            .load_latest_model_context(StoreLoadThreadHistoryParams {
+                thread_id,
+                include_archived: true,
+            })
+            .await
+            .map_err(thread_store_resume_read_error)?;
+        if latest_model_context.thread_id != thread_id {
+            return Err(internal_error(format!(
+                "model context thread id mismatch: requested {thread_id}, got {}",
+                latest_model_context.thread_id
+            )));
+        }
+
+        let persisted_fingerprints = visible_text_message_fingerprints(&persisted_items);
+        let model_context_fingerprints =
+            visible_text_message_fingerprints(&latest_model_context.items);
+        let persisted_history = visible_context_fingerprint(&persisted_fingerprints);
+        let latest_model_context = visible_context_fingerprint(&model_context_fingerprints);
+
+        let exact_visible_text_match = persisted_fingerprints == model_context_fingerprints;
+        let latest_visible_text_message_matches =
+            persisted_history.latest_visible_text_message_sha256.is_some()
+                && persisted_history.latest_visible_text_message_sha256
+                    == latest_model_context.latest_visible_text_message_sha256;
+        let anchor_in_persisted_history = anchor_sha256
+            .as_ref()
+            .map(|anchor| persisted_fingerprints.contains(anchor));
+        let anchor_in_latest_model_context = anchor_sha256
+            .as_ref()
+            .map(|anchor| model_context_fingerprints.contains(anchor));
+
+        Ok(Some(
+            ThreadContextAttestResponse {
+                thread_id: thread_id.to_string(),
+                history_mode,
+                persisted_history,
+                latest_model_context,
+                exact_visible_text_match,
+                latest_visible_text_message_matches,
+                anchor_sha256,
+                anchor_in_persisted_history,
+                anchor_in_latest_model_context,
+            }
+            .into(),
+        ))
     }
 
     pub(crate) async fn thread_turns_list(

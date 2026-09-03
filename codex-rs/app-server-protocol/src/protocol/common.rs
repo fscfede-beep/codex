@@ -798,6 +798,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadReadResponse,
     },
+    #[experimental("thread/context/attest")]
+    ThreadContextAttest => "thread/context/attest" {
+        params: v2::ThreadContextAttestParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadContextAttestResponse,
+    },
     ThreadTurnsList => "thread/turns/list" {
         params: v2::ThreadTurnsListParams,
         // Explicitly concurrent: this primarily reads append-only rollout storage.

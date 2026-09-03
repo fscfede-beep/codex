@@ -1439,3 +1439,88 @@ mod thread_processor_behavior_tests {
         Ok(())
     }
 }
+
+
+mod context_attestation_tests {
+    use super::super::normalize_context_anchor;
+    use super::super::visible_context_fingerprint;
+    use super::super::visible_text_message_fingerprints;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_rollout::RolloutItem;
+
+    fn message(role: &str, text: &str) -> RolloutItem {
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: role.to_string(),
+                content: vec![ContentItem::InputText {
+                    text: text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        )
+    }
+
+    #[test]
+    fn fingerprints_only_user_and_assistant_visible_text_messages() {
+        let items = vec![
+            message("system", "hidden from attestation"),
+            message("user", "hello"),
+            message("assistant", "world"),
+        ];
+
+        let fingerprints = visible_text_message_fingerprints(&items);
+
+        assert_eq!(fingerprints.len(), 2);
+        assert_ne!(fingerprints[0], fingerprints[1]);
+    }
+
+    #[test]
+    fn aggregate_fingerprint_is_deterministic_and_tracks_latest_message() {
+        let items = vec![message("user", "hello"), message("assistant", "world")];
+        let fingerprints = visible_text_message_fingerprints(&items);
+        let first = visible_context_fingerprint(&fingerprints);
+        let second = visible_context_fingerprint(&fingerprints);
+
+        assert_eq!(first, second);
+        assert_eq!(first.visible_text_message_count, 2);
+        assert_eq!(
+            first.latest_visible_text_message_sha256,
+            fingerprints.last().cloned()
+        );
+    }
+
+    #[test]
+    fn visible_message_order_changes_aggregate_fingerprint() {
+        let first = visible_text_message_fingerprints(&[
+            message("user", "hello"),
+            message("assistant", "world"),
+        ]);
+        let second = visible_text_message_fingerprints(&[
+            message("assistant", "world"),
+            message("user", "hello"),
+        ]);
+
+        assert_ne!(
+            visible_context_fingerprint(&first).visible_text_messages_sha256,
+            visible_context_fingerprint(&second).visible_text_messages_sha256
+        );
+    }
+
+    #[test]
+    fn anchor_validation_accepts_sha256_hex_and_normalizes_case() {
+        let uppercase = "A".repeat(64);
+        assert_eq!(
+            normalize_context_anchor(Some(uppercase)).expect("valid hash"),
+            Some("a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn anchor_validation_rejects_non_sha256_values() {
+        assert!(normalize_context_anchor(Some("not-a-hash".to_string())).is_err());
+    }
+}
