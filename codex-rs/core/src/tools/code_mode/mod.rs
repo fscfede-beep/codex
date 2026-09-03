@@ -259,14 +259,22 @@ pub(super) async fn handle_runtime_response(
         RuntimeResponse::Yielded { content_items, .. } => {
             let mut content_items = into_function_call_output_content_items(content_items);
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
+            content_items = truncate_code_mode_result(
+                content_items,
+                max_output_tokens,
+                exec.turn.model_info().truncation_policy.into(),
+            );
             prepend_script_status(&mut content_items, &script_status, wall_time);
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
         RuntimeResponse::Terminated { content_items, .. } => {
             let mut content_items = into_function_call_output_content_items(content_items);
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
+            content_items = truncate_code_mode_result(
+                content_items,
+                max_output_tokens,
+                exec.turn.model_info().truncation_policy.into(),
+            );
             prepend_script_status(&mut content_items, &script_status, wall_time);
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
@@ -283,7 +291,11 @@ pub(super) async fn handle_runtime_response(
                     text: format!("Script error:\n{error_text}"),
                 });
             }
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
+            content_items = truncate_code_mode_result(
+                content_items,
+                max_output_tokens,
+                exec.turn.model_info().truncation_policy.into(),
+            );
             prepend_script_status(&mut content_items, &script_status, wall_time);
             Ok(FunctionToolOutput::from_content(
                 content_items,
@@ -326,9 +338,14 @@ fn prepend_script_status(
 fn truncate_code_mode_result(
     items: Vec<FunctionCallOutputContentItem>,
     max_output_tokens: Option<usize>,
+    truncation_policy: TruncationPolicy,
 ) -> Vec<FunctionCallOutputContentItem> {
-    let max_output_tokens = resolve_max_tokens(max_output_tokens);
-    let policy = TruncationPolicy::Tokens(max_output_tokens);
+    let requested_policy = TruncationPolicy::Tokens(resolve_max_tokens(max_output_tokens));
+    let policy = if requested_policy.byte_budget() < truncation_policy.byte_budget() {
+        requested_policy
+    } else {
+        truncation_policy
+    };
     if items
         .iter()
         .all(|item| matches!(item, FunctionCallOutputContentItem::InputText { .. }))
@@ -455,6 +472,7 @@ mod tests {
     use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_protocol::openai_models::ToolMode;
     use codex_tools::ToolName;
+    use codex_utils_output_truncation::TruncationPolicy;
     use serde_json::json;
 
     #[tokio::test]
@@ -527,7 +545,34 @@ mod tests {
         }];
 
         assert_eq!(
-            truncate_code_mode_result(items, Some(5)),
+            truncate_code_mode_result(
+                items,
+                Some(5),
+                TruncationPolicy::Tokens(/*tokens*/ 10_000),
+            ),
+            vec![FunctionCallOutputContentItem::InputText {
+                text: concat!(
+                    "Warning: truncated output (original token count: 10)\n",
+                    "Total output lines: 1\n\n",
+                    "0123456789…5 tokens truncated…0123456789"
+                )
+                .to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn model_policy_clamps_requested_code_mode_output_limit() {
+        let items = vec![FunctionCallOutputContentItem::InputText {
+            text: "0123456789012345678901234567890123456789".to_string(),
+        }];
+
+        assert_eq!(
+            truncate_code_mode_result(
+                items,
+                Some(/*max_output_tokens*/ 100),
+                TruncationPolicy::Tokens(/*tokens*/ 5),
+            ),
             vec![FunctionCallOutputContentItem::InputText {
                 text: concat!(
                     "Warning: truncated output (original token count: 10)\n",
@@ -546,7 +591,11 @@ mod tests {
         }];
 
         assert_eq!(
-            truncate_code_mode_result(items, Some(5)),
+            truncate_code_mode_result(
+                items,
+                Some(5),
+                TruncationPolicy::Tokens(/*tokens*/ 10_000),
+            ),
             vec![FunctionCallOutputContentItem::InputText {
                 text: "[omitted 1 audio items ...]".to_string(),
             }]
