@@ -1,0 +1,65 @@
+name: Issue 35751 one-shot TDD
+
+on:
+  push:
+    branches:
+      - fix/35751-compaction-tools-v2
+    paths:
+      - .github/workflows/issue-35751-one-shot.yml
+      - red.patch
+      - green.patch
+permissions:
+  contents: write
+
+jobs:
+  tdd:
+    if: github.actor == 'fscfede-beep'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: RED - apply regression only
+        run: git apply red.patch
+
+      - name: RED - prove regression fails for the right reason
+        shell: bash
+        run: |
+          set +e
+          cargo test -p codex-core websocket_incremental_request_forces_full_resend_for_context_replacement --lib --no-fail-fast
+          status=$?
+          set -e
+          test "$status" -ne 0
+
+      - name: Reset RED-only changes
+        run: git reset --hard HEAD
+
+      - name: GREEN - apply production fix and regression
+        run: git apply green.patch
+
+      - name: GREEN - focused context replacement regression
+        run: cargo test -p codex-core websocket_incremental_request_forces_full_resend_for_context_replacement --lib --no-fail-fast
+
+      - name: GREEN - preserve incremental extension optimization
+        run: cargo test -p codex-core websocket_incremental_request_keeps_ordinary_extension_optimization --lib --no-fail-fast
+
+      - name: GREEN - full codex-core library suite
+        run: cargo test -p codex-core --lib --no-fail-fast
+
+      - name: GREEN - format
+        run: cargo fmt --all -- --check
+
+      - name: Commit GREEN and remove temporary harness
+        shell: bash
+        run: |
+          git config user.name 'fscfede-beep'
+          git config user.email '293577326+fscfede-beep@users.noreply.github.com'
+          rm -f red.patch green.patch .github/workflows/issue-35751-one-shot.yml
+          git add codex-rs/core/src/client.rs codex-rs/core/src/client_tests.rs
+          git add -u
+          git commit -m 'fix: preserve websocket tools across compaction context replacement'
+          git push origin HEAD
