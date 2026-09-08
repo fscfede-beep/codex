@@ -378,6 +378,7 @@ mod tests {
                     platform_family: "unix".to_string(),
                     platform_os: "linux".to_string(),
                     process_id: Some(1),
+                    process_id: Some(1),
                 },
             )),
         });
