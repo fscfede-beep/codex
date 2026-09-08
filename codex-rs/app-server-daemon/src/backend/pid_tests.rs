@@ -192,6 +192,43 @@ async fn stale_record_cleanup_preserves_replacement_record() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn adopts_running_app_server_after_pid_state_is_lost() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let codex = temp.path().join("codex");
+    std::fs::write(&codex, b"#!/bin/sh\nexec sleep 30\n").expect("fake codex");
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755))
+        .expect("executable");
+
+    let backend = PidBackend::new(
+        codex,
+        temp.path().join("app-server.pid"),
+        /*remote_control_enabled*/ true,
+    );
+
+    backend.start().await.expect("start fake app-server");
+    let recorded: PidRecord =
+        serde_json::from_slice(&tokio::fs::read(&backend.pid_file).await.expect("pid record"))
+            .expect("parse pid record");
+
+    tokio::fs::remove_file(&backend.pid_file)
+        .await
+        .expect("remove lost pid state");
+
+    assert!(backend.adopt_running_app_server().await.expect("adopt"));
+    let adopted: PidRecord =
+        serde_json::from_slice(&tokio::fs::read(&backend.pid_file).await.expect("adopted pid"))
+            .expect("parse adopted pid record");
+    assert_eq!(adopted.pid, recorded.pid);
+    assert_eq!(adopted.process_start_time, recorded.process_start_time);
+    assert_eq!(adopted.executable_identity, recorded.executable_identity);
+
+    backend.stop().await.expect("stop adopted app-server");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn pid_record_captures_the_resolved_launch_binary() {
     use std::os::unix::fs::PermissionsExt;
 
