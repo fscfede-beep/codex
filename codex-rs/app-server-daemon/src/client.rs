@@ -30,6 +30,7 @@ const INITIALIZE_REQUEST_ID: RequestId = RequestId::Integer(1);
 pub(crate) struct ProbeInfo {
     pub(crate) app_server_version: String,
     pub(crate) process_id: Option<u32>,
+    pub(crate) codex_home: codex_utils_absolute_path::AbsolutePathBuf,
 }
 
 pub(crate) async fn probe(socket_path: &Path) -> Result<ProbeInfo> {
@@ -59,6 +60,7 @@ async fn probe_inner(socket_path: &Path) -> Result<ProbeInfo> {
     Ok(ProbeInfo {
         app_server_version: parse_version_from_user_agent(&initialize_response.user_agent)?,
         process_id: initialize_response.process_id,
+        codex_home: initialize_response.codex_home,
     })
 }
 
