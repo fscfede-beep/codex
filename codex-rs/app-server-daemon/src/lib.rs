@@ -670,6 +670,16 @@ impl Daemon {
         if backend.is_starting_or_running().await? {
             return Ok(Some(backend));
         }
+
+        let Ok(info) = client::probe(&self.socket_path).await else {
+            return Ok(None);
+        };
+        let Some(pid) = info.process_id else {
+            return Ok(None);
+        };
+        if backend.adopt_running_app_server(pid).await? {
+            return Ok(Some(backend));
+        }
         Ok(None)
     }
 
