@@ -454,6 +454,7 @@ fn ensure_compatible_app_server_version(
 
 async fn connect_remote_app_server(
     endpoint: RemoteAppServerEndpoint,
+    enforce_version_match: bool,
 ) -> color_eyre::Result<AppServerClient> {
     let client_version = env!("CARGO_PKG_VERSION");
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
@@ -468,7 +469,9 @@ async fn connect_remote_app_server(
     .await
     .wrap_err("failed to connect to remote app server")?;
 
-    ensure_compatible_app_server_version(client_version, app_server.server_version())?;
+    if enforce_version_match {
+        ensure_compatible_app_server_version(client_version, app_server.server_version())?;
+    }
     Ok(AppServerClient::Remote(app_server))
 }
 
