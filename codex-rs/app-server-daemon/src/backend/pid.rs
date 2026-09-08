@@ -180,7 +180,8 @@ impl PidBackend {
         let expected = fs::canonicalize(&self.codex_bin)
             .await
             .unwrap_or_else(|_| self.codex_bin.clone());
-        let actual = fs::canonicalize(process.executable_path()?)
+        let actual = process.executable_path()?;
+        let actual = fs::canonicalize(actual)
             .await
             .unwrap_or_else(|_| process.executable_path().unwrap_or_default());
         Ok(actual == expected)
