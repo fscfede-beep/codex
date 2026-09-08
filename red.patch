@@ -1,1 +1,112 @@
-test seed
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@
+ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
+@@
+     Ok(())
+ }
+
++#[test]
++fn websocket_incremental_request_forces_full_resend_for_context_replacement()
++-> anyhow::Result<()> {
++    let client = test_model_client(SessionSource::Cli);
++    let mut model = test_model_info();
++    model.use_responses_lite = true;
++    let base_prompt = Prompt {
++        base_instructions: BaseInstructions {
++            text: "base instructions".to_string(),
++            provenance: None,
++        },
++        ..Default::default()
++    };
++    let build = |prompt: &Prompt| {
++        client.build_responses_request(
++            prompt,
++            &model,
++            None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            None,
++            &test_responses_metadata_for_client(
++                &client,
++                None,
++                format!("{}:0", client.state.thread_id),
++                None,
++                TestCodexResponsesRequestKind::Turn,
++            ),
++        )
++    };
++    let warmup_request = build(&base_prompt)?;
++    assert!(matches!(warmup_request.input.first(), Some(ResponseItem::AdditionalTools { .. })));
++    for replacement in [
++        ResponseItem::Compaction {
++            id: None,
++            encrypted_content: "opaque compaction".to_string(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++        ResponseItem::ContextCompaction {
++            id: None,
++            encrypted_content: Some("opaque context compaction".to_string()),
++            internal_chat_message_metadata_passthrough: None,
++        },
++    ] {
++        let mut prompt = base_prompt.clone();
++        prompt.input.push(replacement);
++        let request = build(&prompt)?;
++        let mut session = client.new_session();
++        session.websocket_session.last_request = Some(warmup_request.clone());
++        assert_eq!(session.get_incremental_items(&request, None, true), None);
++    }
++    Ok(())
++}
++
++#[test]
++fn websocket_incremental_request_keeps_ordinary_extension_optimization()
++-> anyhow::Result<()> {
++    let client = test_model_client(SessionSource::Cli);
++    let mut model = test_model_info();
++    model.use_responses_lite = true;
++    let base_prompt = Prompt {
++        base_instructions: BaseInstructions {
++            text: "base instructions".to_string(),
++            provenance: None,
++        },
++        ..Default::default()
++    };
++    let build = |prompt: &Prompt| {
++        client.build_responses_request(
++            prompt,
++            &model,
++            None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            None,
++            &test_responses_metadata_for_client(
++                &client,
++                None,
++                format!("{}:0", client.state.thread_id),
++                None,
++                TestCodexResponsesRequestKind::Turn,
++            ),
++        )
++    };
++    let warmup_request = build(&base_prompt)?;
++    let user_message = ResponseItem::Message {
++        id: None,
++        role: "user".to_string(),
++        content: vec![ContentItem::InputText { text: "hello".to_string() }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let mut prompt = base_prompt;
++    prompt.input.push(user_message.clone());
++    let request = build(&prompt)?;
++    let mut session = client.new_session();
++    session.websocket_session.last_request = Some(warmup_request);
++    assert_eq!(
++        session.get_incremental_items(&request, None, true),
++        Some(vec![user_message])
++    );
++    Ok(())
++}
++
+ fn test_session_telemetry() -> SessionTelemetry {
