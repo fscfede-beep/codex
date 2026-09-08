@@ -154,6 +154,24 @@ impl PidBackend {
         Ok(argv.len() == args.len() + 1 && argv[0] == expected_bin.to_string_lossy() && argv[1..].iter().zip(args).all(|(actual, expected)| actual == expected))
     }
 
+    #[cfg(windows)]
+    async fn pid_matches_expected_command(&self, pid: u32) -> Result<bool> {
+        let Some(process) = super::windows::Process::open(pid)? else {
+            return Ok(false);
+        };
+        if !process.is_running()? {
+            return Ok(false);
+        }
+        let expected = fs::canonicalize(&self.codex_bin)
+            .await
+            .unwrap_or_else(|_| self.codex_bin.clone());
+        let actual = process.executable_path()?;
+        let actual = fs::canonicalize(actual)
+            .await
+            .unwrap_or_else(|_| self.codex_bin.clone());
+        Ok(actual == expected)
+    }
+
     pub(crate) async fn is_starting_or_running(&self) -> Result<bool> {
         loop {
             match self.read_pid_file_state().await? {
