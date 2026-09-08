@@ -441,10 +441,11 @@ pub fn remote_addr_supports_auth_token(endpoint: &RemoteAppServerEndpoint) -> bo
 async fn connect_remote_app_server(
     endpoint: RemoteAppServerEndpoint,
 ) -> color_eyre::Result<AppServerClient> {
+    let client_version = env!("CARGO_PKG_VERSION");
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
         endpoint,
         client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: client_version.to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
@@ -452,6 +453,15 @@ async fn connect_remote_app_server(
     })
     .await
     .wrap_err("failed to connect to remote app server")?;
+
+    if let Some(server_version) = app_server.server_version()
+        && server_version != client_version
+    {
+        return Err(color_eyre::eyre::eyre!(
+            "incompatible app-server version: TUI is {client_version}, server is {server_version}; restart the app-server daemon and try again"
+        ));
+    }
+
     Ok(AppServerClient::Remote(app_server))
 }
 
