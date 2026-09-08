@@ -17,4 +17,8 @@ platformFamily: string,
  * Operating system for the running app-server target, for example
  * `"macos"`, `"linux"`, or `"windows"`.
  */
-platformOs: string, };
+platformOs: string,
+/**
+ * OS process id of the app-server instance answering this initialize request.
+ */
+processId?: number, };
