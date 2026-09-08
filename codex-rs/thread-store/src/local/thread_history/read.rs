@@ -182,15 +182,49 @@ pub(super) async fn validate_thread_for_paginated_reads(
     let Some(state_db) = store.state_db().await else {
         return Err(ThreadStoreError::Unsupported { operation });
     };
-    let Some(metadata) =
-        state_db
-            .get_thread(thread_id)
+    let metadata = state_db
+        .get_thread(thread_id)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to read thread metadata: {err}"),
+        })?;
+    let metadata = match metadata {
+        Some(metadata) => metadata,
+        None => {
+            // A rollout can survive on disk while its SQLite index row is missing after an
+            // interrupted startup/backfill. Reconstruct only the requested row from the
+            // canonical SessionMeta; do not invoke the legacy migration path here because that
+            // migration intentionally requires SQLite metadata to exist.
+            let resolved = super::thread_rollout_resolver::resolve_current_including_archived(
+                store,
+                thread_id,
+            )
+            .await?
+            .ok_or_else(|| ThreadStoreError::Unsupported { operation })?;
+            let extracted = codex_rollout::extract_metadata_from_rollout(
+                resolved.path.as_path(),
+                store.config.default_model_provider_id.as_str(),
+            )
             .await
             .map_err(|err| ThreadStoreError::Internal {
-                message: format!("failed to read thread metadata: {err}"),
-            })?
-    else {
-        return Err(ThreadStoreError::Unsupported { operation });
+                message: format!("failed to reconstruct thread metadata for {thread_id}: {err}"),
+            })?;
+            state_db
+                .upsert_thread(&extracted.metadata)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to persist reconstructed thread metadata for {thread_id}: {err}"
+                    ),
+                })?;
+            state_db
+                .get_thread(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to reread thread metadata after reconstruction: {err}"),
+                })?
+                .ok_or_else(|| ThreadStoreError::Unsupported { operation })?
+        }
     };
     if metadata.archived_at.is_some() && !include_archived {
         return Err(ThreadStoreError::InvalidRequest {
