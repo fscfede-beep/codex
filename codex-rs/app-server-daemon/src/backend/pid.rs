@@ -106,10 +106,6 @@ impl PidBackend {
             Ok(value) => value,
             Err(_) => return Ok(false),
         };
-        let record = PidRecord {
-            pid,
-            process_start_time
-        };
         let reservation_lock = self.acquire_reservation_lock().await?;
         if !matches!(
             self.read_pid_file_state_with_lock_held().await?,
@@ -118,13 +114,19 @@ impl PidBackend {
             drop(reservation_lock);
             return Ok(false);
         }
+        // Re-check after taking the reservation lock so a PID reuse between the
+        // socket probe and publication cannot be adopted.
+        if read_process_start_time(pid).await.ok().as_deref() != Some(process_start_time.as_str()) {
+            drop(reservation_lock);
+            return Ok(false);
+        }
         if !self.pid_matches_expected_command(pid).await? {
             drop(reservation_lock);
             return Ok(false);
         }
         let record = PidRecord {
-            pid: record.pid,
-            process_start_time: record.process_start_time,
+            pid,
+            process_start_time,
         };
         let contents = serde_json::to_vec(&record).context("failed to serialize adopted pid record")?;
         let temp_pid_file = self.pid_file.with_extension("pid.adopt.tmp");
