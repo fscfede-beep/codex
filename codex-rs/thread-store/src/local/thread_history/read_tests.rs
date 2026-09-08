@@ -31,6 +31,45 @@ use crate::StoredTurnStatus;
 use crate::local::test_support::test_config;
 
 #[tokio::test]
+async fn list_turns_repairs_missing_thread_metadata_from_rollout() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let rollout_path = rollout_path(home.path(), thread_id);
+    write_rollout(rollout_path.as_path(), thread_id, /*history_base*/ None);
+
+    let state_db = codex_state::StateRuntime::init(
+        config.sqlite.clone(),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("state runtime");
+    let store = LocalThreadStore::new(config, Some(state_db.clone()));
+
+    assert!(state_db.get_thread(thread_id).await.expect("read metadata").is_none());
+
+    let page = store
+        .list_turns(turn_params(
+            thread_id,
+            /*cursor*/ None,
+            /*page_size*/ 10,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect("metadata should be repaired before paginated read");
+
+    assert_eq!(page.turns.len(), 0);
+    assert!(
+        state_db
+            .get_thread(thread_id)
+            .await
+            .expect("reread metadata")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn list_turns_pages_projected_rows_and_applies_item_views() {
     let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let db = history_db(&store).await;
