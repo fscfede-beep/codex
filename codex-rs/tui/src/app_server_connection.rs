@@ -51,8 +51,11 @@ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppS
 
             Ok(AppServerClient::Remote(app_server))
         }
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+        AppServerTarget::LocalDaemon { endpoint } => {
+            connect_remote_app_server(endpoint.clone(), true).await
+        }
+        AppServerTarget::Remote { endpoint } => {
+            connect_remote_app_server(endpoint.clone(), false).await
         }
     }
 }
