@@ -313,14 +313,19 @@ impl Daemon {
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
         if let Ok(info) = client::probe(&self.socket_path).await {
-            return Ok(self
-                .output(
-                    LifecycleStatus::AlreadyRunning,
-                    self.running_backend(&settings).await?,
-                    /*pid*/ None,
-                    Some(info.app_server_version),
-                )
-                .await);
+            if self.running_backend_instance(&settings).await?.is_some() {
+                return Ok(self
+                    .output(
+                        LifecycleStatus::AlreadyRunning,
+                        Some(BackendKind::Pid),
+                        info.process_id,
+                        Some(info.app_server_version),
+                    )
+                    .await);
+            }
+            return Err(anyhow!(
+                "app server is running but could not be safely adopted by codex app-server daemon"
+            ));
         }
 
         if self.running_backend_instance(&settings).await?.is_some() {
