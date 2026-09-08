@@ -677,6 +677,14 @@ impl Daemon {
         let Some(pid) = info.process_id else {
             return Ok(None);
         };
+        let expected_codex_home = self
+            .settings_file
+            .parent()
+            .and_then(Path::parent)
+            .context("daemon settings path has no Codex home")?;
+        if info.codex_home.as_path() != expected_codex_home {
+            return Ok(None);
+        }
         if backend.adopt_running_app_server(pid).await? {
             return Ok(Some(backend));
         }
