@@ -5,7 +5,7 @@ on:
     branches:
       - fix/35751-compaction-websocket-tools
     paths:
-      - .github/workflows/issue-35751-verify.yml
+      - .github/workflows/issue-35751-tdd.yml
       - codex-rs/core/src/client.rs
       - codex-rs/core/src/client_tests.rs
 
@@ -41,7 +41,23 @@ jobs:
           p = Path('codex-rs/core/src/client.rs')
           s = p.read_text()
           marker = '''        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }\n'''
-          fix = '''        // Compaction replaces model context instead of extending it behind\n        // `previous_response_id`. A websocket delta would omit the current\n        // Responses Lite tool prefix, so force a full request and rebuild it.\n        if incremental_items.iter().any(|item| {\n            matches!(\n                item,\n                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }\n            )\n        }) {\n            trace!("incremental request failed, context replacement requires full request");\n            return None;\n        }\n\n        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }\n'''
+          fix = '''        // Compaction replaces model context instead of extending it behind
+        // `previous_response_id`. A websocket delta would omit the current
+        // Responses Lite tool prefix, so force a full request and rebuild it.
+        if incremental_items.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+            )
+        }) {
+            trace!("incremental request failed, context replacement requires full request");
+            return None;
+        }
+
+        if !allow_empty_delta && incremental_items.is_empty() {
+            return None;
+        }
+'''
           if marker not in s:
               raise SystemExit('production insertion marker not found')
           p.write_text(s.replace(marker, fix, 1))
