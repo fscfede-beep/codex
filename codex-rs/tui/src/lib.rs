@@ -3850,30 +3850,22 @@ trust_level = "untrusted"
         );
         Ok(())
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ensure_compatible_app_server_version;
-
     #[test]
     fn compatible_when_server_version_matches() {
-        assert!(ensure_compatible_app_server_version("0.149.1", Some("0.149.1")).is_ok());
+        assert!(super::ensure_compatible_app_server_version("0.149.1", Some("0.149.1")).is_ok());
     }
 
     #[test]
     fn compatible_when_server_does_not_report_version() {
-        assert!(ensure_compatible_app_server_version("0.149.1", None).is_ok());
+        assert!(super::ensure_compatible_app_server_version("0.149.1", None).is_ok());
     }
 
     #[test]
     fn rejects_mixed_app_server_version() {
-        let err = ensure_compatible_app_server_version("0.149.1", Some("0.147.0"))
+        let err = super::ensure_compatible_app_server_version("0.149.1", Some("0.147.0"))
             .expect_err("version skew should be rejected");
-        assert!(
-            err.to_string().contains("restart the app-server daemon"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("restart the app-server daemon"), "{err}");
     }
+
 }
 
