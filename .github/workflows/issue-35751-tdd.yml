@@ -1,0 +1,26 @@
+name: Issue 35751 TDD verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'codex-rs/core/src/client.rs'
+      - 'codex-rs/core/src/client_tests.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.actor == 'fscfede-beep'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: RED regression
+        run: cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
