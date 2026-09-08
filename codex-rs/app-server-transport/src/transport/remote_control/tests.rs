@@ -1627,6 +1627,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),
+                            process_id: Some(1),
                         },
                     ),
                 ),
