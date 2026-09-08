@@ -1,12 +1,11 @@
-name: Issue 35751 TDD
+name: Issue 35751 Verify
 
 on:
   push:
     branches:
       - fix/35751-compaction-websocket-tools
     paths:
-      - .github/workflows/issue-35751-tdd.yml
-      - .issue-35751-stage
+      - .github/workflows/issue-35751-verify.yml
       - codex-rs/core/src/client.rs
       - codex-rs/core/src/client_tests.rs
 
@@ -14,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  tdd:
+  verify:
     if: github.actor == 'fscfede-beep'
     runs-on: ubuntu-latest
     steps:
@@ -25,157 +24,7 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Read stage
-        id: stage
-        shell: bash
-        run: echo "stage=$(cat .issue-35751-stage 2>/dev/null || echo INIT)" >> "$GITHUB_OUTPUT"
-
-      - name: RED - add regression tests
-        if: steps.stage.outputs.stage == 'INIT'
-        shell: bash
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-          p = Path('codex-rs/core/src/client_tests.rs')
-          s = p.read_text()
-          marker = '\nfn test_session_telemetry() -> SessionTelemetry {'
-          if 'websocket_incremental_request_for_context_replacement_forces_full_resend' not in s:
-              tests = r'''
-
-          #[test]
-          fn websocket_incremental_request_for_context_replacement_forces_full_resend() {
-              let client = test_model_client(SessionSource::Cli);
-              let mut model = test_model_info();
-              model.use_responses_lite = true;
-              let base_prompt = Prompt {
-                  base_instructions: BaseInstructions {
-                      text: "base instructions".to_string(),
-                      provenance: None,
-                  },
-                  ..Default::default()
-              };
-              let build = |prompt: &Prompt| {
-                  client.build_responses_request(
-                      prompt,
-                      &model,
-                      /*effort*/ None,
-                      codex_protocol::config_types::ReasoningSummary::None,
-                      /*service_tier*/ None,
-                      &test_responses_metadata_for_client(
-                          &client,
-                          /*turn_id*/ None,
-                          format!("{}:0", client.state.thread_id),
-                          /*parent_thread_id*/ None,
-                          TestCodexResponsesRequestKind::Turn,
-                      ),
-                  )
-              };
-
-              let warmup_request = build(&base_prompt).expect("build warmup request");
-              assert!(matches!(
-                  warmup_request.input.first(),
-                  Some(ResponseItem::AdditionalTools { .. })
-              ));
-
-              for replacement in [
-                  ResponseItem::Compaction {
-                      id: None,
-                      encrypted_content: "opaque compaction".to_string(),
-                      internal_chat_message_metadata_passthrough: None,
-                  },
-                  ResponseItem::ContextCompaction {
-                      id: None,
-                      encrypted_content: Some("opaque context compaction".to_string()),
-                      internal_chat_message_metadata_passthrough: None,
-                  },
-              ] {
-                  let mut prompt = base_prompt.clone();
-                  prompt.input.push(replacement);
-                  let request = build(&prompt).expect("build replacement request");
-
-                  let mut session = client.new_session();
-                  session.websocket_session.last_request = Some(warmup_request.clone());
-
-                  assert_eq!(
-                      session.get_incremental_items(
-                          &request,
-                          /*last_response*/ None,
-                          /*allow_empty_delta*/ true,
-                      ),
-                      None
-                  );
-              }
-          }
-
-          #[test]
-          fn websocket_incremental_request_keeps_ordinary_extension_optimization() {
-              let client = test_model_client(SessionSource::Cli);
-              let mut model = test_model_info();
-              model.use_responses_lite = true;
-              let base_prompt = Prompt {
-                  base_instructions: BaseInstructions {
-                      text: "base instructions".to_string(),
-                      provenance: None,
-                  },
-                  ..Default::default()
-              };
-              let build = |prompt: &Prompt| {
-                  client.build_responses_request(
-                      prompt,
-                      &model,
-                      /*effort*/ None,
-                      codex_protocol::config_types::ReasoningSummary::None,
-                      /*service_tier*/ None,
-                      &test_responses_metadata_for_client(
-                          &client,
-                          /*turn_id*/ None,
-                          format!("{}:0", client.state.thread_id),
-                          /*parent_thread_id*/ None,
-                          TestCodexResponsesRequestKind::Turn,
-                      ),
-                  )
-              };
-
-              let warmup_request = build(&base_prompt).expect("build warmup request");
-              let user_message = ResponseItem::Message {
-                  id: None,
-                  role: "user".to_string(),
-                  content: vec![ContentItem::InputText {
-                      text: "hello".to_string(),
-                  }],
-                  phase: None,
-                  internal_chat_message_metadata_passthrough: None,
-              };
-              let mut prompt = base_prompt;
-              prompt.input.push(user_message.clone());
-              let request = build(&prompt).expect("build ordinary extension request");
-
-              let mut session = client.new_session();
-              session.websocket_session.last_request = Some(warmup_request);
-              assert_eq!(
-                  session.get_incremental_items(
-                      &request,
-                      /*last_response*/ None,
-                      /*allow_empty_delta*/ true,
-                  ),
-                  Some(vec![user_message])
-              );
-          }
-          '''
-              if marker not in s:
-                  raise SystemExit('test insertion marker not found')
-              s = s.replace(marker, tests + marker, 1)
-              p.write_text(s)
-          PY
-          printf 'RED_PENDING\n' > .issue-35751-stage
-          git config user.name 'fscfede-beep'
-          git config user.email 'fscfede-beep@users.noreply.github.com'
-          git add codex-rs/core/src/client_tests.rs .issue-35751-stage
-          git commit -m 'test: reproduce websocket compaction tool loss'
-          git push origin HEAD
-
-      - name: RED - prove regression fails
-        if: steps.stage.outputs.stage == 'RED_PENDING'
+      - name: RED - prove regression
         shell: bash
         run: |
           set +e
@@ -184,56 +33,30 @@ jobs:
           set -e
           test "$status" -ne 0
 
-      - name: GREEN - apply minimal production fix
-        if: steps.stage.outputs.stage == 'RED_PENDING'
+      - name: GREEN - apply fix and verify
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
           p = Path('codex-rs/core/src/client.rs')
           s = p.read_text()
-          old = """        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }\n"""
-          new = """        // Compaction items replace model context rather than extend the context behind
-        // `previous_response_id`. Sending one as a websocket delta can elide the current
-        // Responses Lite tool prefix, so force a full request and rebuild the prefix.
-        if incremental_items.iter().any(|item| {
-            matches!(
-                item,
-                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-            )
-        }) {
-            trace!("incremental request failed, context replacement requires full request");
-            return None;
-        }
-
-        if !allow_empty_delta && incremental_items.is_empty() {
-            return None;
-        }
-"""
-          if old not in s:
+          marker = '''        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }\n'''
+          fix = '''        // Compaction replaces model context instead of extending it behind\n        // `previous_response_id`. A websocket delta would omit the current\n        // Responses Lite tool prefix, so force a full request and rebuild it.\n        if incremental_items.iter().any(|item| {\n            matches!(\n                item,\n                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }\n            )\n        }) {\n            trace!("incremental request failed, context replacement requires full request");\n            return None;\n        }\n\n        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }\n'''
+          if marker not in s:
               raise SystemExit('production insertion marker not found')
-          p.write_text(s.replace(old, new, 1))
+          p.write_text(s.replace(marker, fix, 1))
           PY
-
           cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
           cargo test -p codex-core websocket_incremental_request_keeps_ordinary_extension_optimization --lib --no-fail-fast
           cargo test -p codex-core client_tests:: --lib --no-fail-fast
           cargo fmt --all -- --check
+          git diff --check
 
-      - name: Commit GREEN and clean bootstrap
-        if: steps.stage.outputs.stage == 'RED_PENDING'
+      - name: Commit verified fix
         shell: bash
         run: |
           git config user.name 'fscfede-beep'
           git config user.email 'fscfede-beep@users.noreply.github.com'
-          git rm .issue-35751-stage .github/workflows/issue-35751-tdd.yml
           git add codex-rs/core/src/client.rs codex-rs/core/src/client_tests.rs
           git commit -m 'fix: preserve websocket tools across compaction context replacement'
           git push origin HEAD
-
-      - name: Final no-op
-        if: steps.stage.outputs.stage == 'DONE'
-        run: echo 'TDD bootstrap already complete'
-
-      # Human-authored retrigger; this comment intentionally changes the workflow commit
-      # so the second stage runs after the action-token test-only push.
