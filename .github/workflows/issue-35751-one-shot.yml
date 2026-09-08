@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   tdd:
-    if: github.actor == 'fscfede-beep'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -222,17 +221,17 @@ jobs:
           if marker not in s:
               raise SystemExit('production insertion marker not found')
           fix = '''        // Compaction items replace model context rather than extend the context behind
-        // `previous_response_id`. Sending them as a websocket delta can omit request-local
-        // prefix items such as Responses Lite `AdditionalTools`, so force a full request.
-        if incremental_items.iter().any(|item| {
-            matches!(
-                item,
-                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-            )
-        }) {
-            trace!("incremental request failed, context replacement requires full request");
-            return None;
-        }
+          // `previous_response_id`. Sending them as a websocket delta can omit request-local
+          // prefix items such as Responses Lite `AdditionalTools`, so force a full request.
+          if incremental_items.iter().any(|item| {
+              matches!(
+                  item,
+                  ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+              )
+          }) {
+              trace!("incremental request failed, context replacement requires full request");
+              return None;
+          }
 
 ''' + marker
           p.write_text(s.replace(marker, fix, 1))
@@ -256,9 +255,7 @@ jobs:
           git config user.name 'fscfede-beep'
           git config user.email 'fscfede-beep@users.noreply.github.com'
           git rm -f .github/workflows/issue-35751-one-shot.yml
-          git rm -f red.patch green.patch 2>/dev/null || true
           git add codex-rs/core/src/client.rs codex-rs/core/src/client_tests.rs
-          git add -u
           git diff --cached --check
           git commit -m 'fix: preserve websocket tools across compaction context replacement'
           git push origin HEAD
