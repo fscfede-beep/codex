@@ -334,15 +334,22 @@ impl Daemon {
 
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
-        let (status, backend, pid, info) = if let Ok(info) = client::probe(&self.socket_path).await
-        {
-            (
-                LifecycleStatus::AlreadyRunning,
-                self.running_backend(&settings).await?,
-                None,
-                info,
-            )
-        } else if self.running_backend_instance(&settings).await?.is_some() {
+        if let Ok(info) = client::probe(&self.socket_path).await {
+            if let Some(backend) = self.running_backend_instance(&settings).await? {
+                return Ok(self
+                    .output(
+                        LifecycleStatus::AlreadyRunning,
+                        Some(BackendKind::Pid),
+                        info.process_id,
+                        Some(info.app_server_version),
+                    )
+                    .await);
+            }
+            return Err(anyhow!(
+                "app server is running but could not be safely adopted by codex app-server daemon"
+            ));
+        }
+        let (status, backend, pid, info) = if self.running_backend_instance(&settings).await?.is_some() {
             (
                 LifecycleStatus::AlreadyRunning,
                 Some(BackendKind::Pid),
@@ -733,6 +740,23 @@ impl Daemon {
         if backend.is_starting_or_running().await? {
             return Ok(Some(backend));
         }
+        let Ok(info) = client::probe(&self.socket_path).await else {
+            return Ok(None);
+        };
+        let Some(pid) = info.process_id else {
+            return Ok(None);
+        };
+        let expected_codex_home = self
+            .settings_file
+            .parent()
+            .and_then(Path::parent)
+            .context("daemon settings path has no Codex home")?;
+        if info.codex_home.as_path() != expected_codex_home {
+            return Ok(None);
+        }
+        if backend.adopt_running_app_server(pid).await? {
+            return Ok(Some(backend));
+        }
         Ok(None)
     }
 
@@ -1060,6 +1084,8 @@ mod tests {
     fn restart_decision_preserves_forced_refreshes() {
         let current_info = ProbeInfo {
             app_server_version: "0.1.0".to_string(),
+            process_id: None,
+            codex_home: std::path::PathBuf::from("/tmp/codex").into(),
         };
 
         assert_eq!(

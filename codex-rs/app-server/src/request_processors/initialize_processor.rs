@@ -179,6 +179,7 @@ impl InitializeRequestProcessor {
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
+            process_id: Some(std::process::id()),
         };
 
         self.outgoing
