@@ -5,7 +5,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::managed_install::ExecutableIdentity;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -108,6 +107,51 @@ impl PidBackend {
             lock_file,
             command_kind: PidCommandKind::UpdateLoop,
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) async fn adopt_running_app_server(&self, pid: u32) -> Result<bool> {
+        if !matches!(self.command_kind, PidCommandKind::AppServer { .. }) {
+            return Ok(false);
+        }
+        let process_start_time = match read_process_start_time(pid).await {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        let reservation_lock = self.acquire_reservation_lock().await?;
+        if !matches!(self.read_pid_file_state_with_lock_held().await?, PidFileState::Missing) {
+            drop(reservation_lock);
+            return Ok(false);
+        }
+        if read_process_start_time(pid).await.ok().as_deref() != Some(process_start_time.as_str()) {
+            drop(reservation_lock);
+            return Ok(false);
+        }
+        if !self.pid_matches_expected_command(pid).await? {
+            drop(reservation_lock);
+            return Ok(false);
+        }
+        let record = PidRecord { pid, process_start_time };
+        let contents = serde_json::to_vec(&record).context("failed to serialize adopted pid record")?;
+        let temp_pid_file = self.pid_file.with_extension("pid.adopt.tmp");
+        fs::write(&temp_pid_file, &contents).await
+            .with_context(|| format!("failed to write adopted pid temp file {}", temp_pid_file.display()))?;
+        fs::rename(&temp_pid_file, &self.pid_file).await
+            .with_context(|| format!("failed to publish adopted pid file {}", self.pid_file.display()))?;
+        drop(reservation_lock);
+        Ok(true)
+    }
+
+    #[cfg(unix)]
+    async fn pid_matches_expected_command(&self, pid: u32) -> Result<bool> {
+        let expected_bin = fs::canonicalize(&self.codex_bin).await.unwrap_or_else(|_| self.codex_bin.clone());
+        let proc_dir = PathBuf::from("/proc").join(pid.to_string());
+        let exe_path = match fs::canonicalize(proc_dir.join("exe")).await { Ok(path) => path, Err(_) => return Ok(false) };
+        if exe_path != expected_bin { return Ok(false); }
+        let raw_cmdline = match fs::read(proc_dir.join("cmdline")).await { Ok(bytes) => bytes, Err(_) => return Ok(false) };
+        let argv = raw_cmdline.split(|byte| *byte == 0).filter(|part| !part.is_empty()).map(|part| String::from_utf8_lossy(part).into_owned()).collect::<Vec<_>>();
+        let args = self.command_args();
+        Ok(argv.len() == args.len() + 1 && argv[0] == expected_bin.to_string_lossy() && argv[1..].iter().zip(args).all(|(actual, expected)| actual == expected))
     }
 
     pub(crate) async fn is_starting_or_running(&self) -> Result<bool> {
