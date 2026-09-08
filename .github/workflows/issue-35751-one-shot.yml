@@ -6,8 +6,6 @@ on:
       - fix/35751-compaction-tools-v2
     paths:
       - .github/workflows/issue-35751-one-shot.yml
-      - red.patch
-      - green.patch
 permissions:
   contents: write
 
@@ -23,14 +21,103 @@ jobs:
         with:
           toolchain: stable
 
-      - name: RED - apply regression only
-        run: git apply red.patch
+      - name: RED - inject regression tests
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('codex-rs/core/src/client_tests.rs')
+          s = p.read_text()
+          marker = 'fn test_session_telemetry() -> SessionTelemetry {'
+          tests = r'''
 
-      - name: RED - prove regression fails for the right reason
+          #[test]
+          fn websocket_incremental_request_for_context_replacement_forces_full_resend() -> anyhow::Result<()> {
+              let client = test_model_client(SessionSource::Cli);
+              let mut model = test_model_info();
+              model.use_responses_lite = true;
+              let base_prompt = Prompt {
+                  base_instructions: BaseInstructions { text: "base instructions".to_string(), provenance: None },
+                  ..Default::default()
+              };
+              let build = |prompt: &Prompt| client.build_responses_request(
+                  prompt, &model, None,
+                  codex_protocol::config_types::ReasoningSummary::None,
+                  None,
+                  &test_responses_metadata_for_client(
+                      &client, None, format!("{}:0", client.state.thread_id), None,
+                      TestCodexResponsesRequestKind::Turn,
+                  ),
+              );
+              let warmup_request = build(&base_prompt)?;
+              assert!(matches!(warmup_request.input.first(), Some(ResponseItem::AdditionalTools { .. })));
+              for replacement in [
+                  ResponseItem::Compaction {
+                      id: None,
+                      encrypted_content: "opaque compaction".to_string(),
+                      internal_chat_message_metadata_passthrough: None,
+                  },
+                  ResponseItem::ContextCompaction {
+                      id: None,
+                      encrypted_content: Some("opaque context compaction".to_string()),
+                      internal_chat_message_metadata_passthrough: None,
+                  },
+              ] {
+                  let mut prompt = base_prompt.clone();
+                  prompt.input.push(replacement);
+                  let request = build(&prompt)?;
+                  let mut session = client.new_session();
+                  session.websocket_session.last_request = Some(warmup_request.clone());
+                  assert_eq!(session.get_incremental_items(&request, None, true), None);
+              }
+              Ok(())
+          }
+
+          #[test]
+          fn websocket_incremental_request_keeps_ordinary_extension_optimization() -> anyhow::Result<()> {
+              let client = test_model_client(SessionSource::Cli);
+              let mut model = test_model_info();
+              model.use_responses_lite = true;
+              let base_prompt = Prompt {
+                  base_instructions: BaseInstructions { text: "base instructions".to_string(), provenance: None },
+                  ..Default::default()
+              };
+              let build = |prompt: &Prompt| client.build_responses_request(
+                  prompt, &model, None,
+                  codex_protocol::config_types::ReasoningSummary::None,
+                  None,
+                  &test_responses_metadata_for_client(
+                      &client, None, format!("{}:0", client.state.thread_id), None,
+                      TestCodexResponsesRequestKind::Turn,
+                  ),
+              );
+              let warmup_request = build(&base_prompt)?;
+              let user_message = ResponseItem::Message {
+                  id: None,
+                  role: "user".to_string(),
+                  content: vec![ContentItem::InputText { text: "hello".to_string() }],
+                  phase: None,
+                  internal_chat_message_metadata_passthrough: None,
+              };
+              let mut prompt = base_prompt;
+              prompt.input.push(user_message.clone());
+              let request = build(&prompt)?;
+              let mut session = client.new_session();
+              session.websocket_session.last_request = Some(warmup_request);
+              assert_eq!(session.get_incremental_items(&request, None, true), Some(vec![user_message]));
+              Ok(())
+          }
+          '''
+          if marker not in s:
+              raise SystemExit('test insertion marker not found')
+          p.write_text(s.replace(marker, tests + '\n' + marker, 1))
+          PY
+
+      - name: RED - prove regression fails
         shell: bash
         run: |
           set +e
-          cargo test -p codex-core websocket_incremental_request_forces_full_resend_for_context_replacement --lib --no-fail-fast
+          cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
           status=$?
           set -e
           test "$status" -ne 0
@@ -38,13 +125,123 @@ jobs:
       - name: Reset RED-only changes
         run: git reset --hard HEAD
 
-      - name: GREEN - apply production fix and regression
-        run: git apply green.patch
+      - name: GREEN - inject tests and production fix
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('codex-rs/core/src/client_tests.rs')
+          s = p.read_text()
+          marker = 'fn test_session_telemetry() -> SessionTelemetry {'
+          if marker not in s:
+              raise SystemExit('test insertion marker not found')
+          tests = r'''
 
-      - name: GREEN - focused context replacement regression
-        run: cargo test -p codex-core websocket_incremental_request_forces_full_resend_for_context_replacement --lib --no-fail-fast
+          #[test]
+          fn websocket_incremental_request_for_context_replacement_forces_full_resend() -> anyhow::Result<()> {
+              let client = test_model_client(SessionSource::Cli);
+              let mut model = test_model_info();
+              model.use_responses_lite = true;
+              let base_prompt = Prompt {
+                  base_instructions: BaseInstructions { text: "base instructions".to_string(), provenance: None },
+                  ..Default::default()
+              };
+              let build = |prompt: &Prompt| client.build_responses_request(
+                  prompt, &model, None,
+                  codex_protocol::config_types::ReasoningSummary::None,
+                  None,
+                  &test_responses_metadata_for_client(
+                      &client, None, format!("{}:0", client.state.thread_id), None,
+                      TestCodexResponsesRequestKind::Turn,
+                  ),
+              );
+              let warmup_request = build(&base_prompt)?;
+              assert!(matches!(warmup_request.input.first(), Some(ResponseItem::AdditionalTools { .. })));
+              for replacement in [
+                  ResponseItem::Compaction {
+                      id: None,
+                      encrypted_content: "opaque compaction".to_string(),
+                      internal_chat_message_metadata_passthrough: None,
+                  },
+                  ResponseItem::ContextCompaction {
+                      id: None,
+                      encrypted_content: Some("opaque context compaction".to_string()),
+                      internal_chat_message_metadata_passthrough: None,
+                  },
+              ] {
+                  let mut prompt = base_prompt.clone();
+                  prompt.input.push(replacement);
+                  let request = build(&prompt)?;
+                  let mut session = client.new_session();
+                  session.websocket_session.last_request = Some(warmup_request.clone());
+                  assert_eq!(session.get_incremental_items(&request, None, true), None);
+              }
+              Ok(())
+          }
 
-      - name: GREEN - preserve incremental extension optimization
+          #[test]
+          fn websocket_incremental_request_keeps_ordinary_extension_optimization() -> anyhow::Result<()> {
+              let client = test_model_client(SessionSource::Cli);
+              let mut model = test_model_info();
+              model.use_responses_lite = true;
+              let base_prompt = Prompt {
+                  base_instructions: BaseInstructions { text: "base instructions".to_string(), provenance: None },
+                  ..Default::default()
+              };
+              let build = |prompt: &Prompt| client.build_responses_request(
+                  prompt, &model, None,
+                  codex_protocol::config_types::ReasoningSummary::None,
+                  None,
+                  &test_responses_metadata_for_client(
+                      &client, None, format!("{}:0", client.state.thread_id), None,
+                      TestCodexResponsesRequestKind::Turn,
+                  ),
+              );
+              let warmup_request = build(&base_prompt)?;
+              let user_message = ResponseItem::Message {
+                  id: None,
+                  role: "user".to_string(),
+                  content: vec![ContentItem::InputText { text: "hello".to_string() }],
+                  phase: None,
+                  internal_chat_message_metadata_passthrough: None,
+              };
+              let mut prompt = base_prompt;
+              prompt.input.push(user_message.clone());
+              let request = build(&prompt)?;
+              let mut session = client.new_session();
+              session.websocket_session.last_request = Some(warmup_request);
+              assert_eq!(session.get_incremental_items(&request, None, true), Some(vec![user_message]));
+              Ok(())
+          }
+          '''
+          p.write_text(s.replace(marker, tests + '\n' + marker, 1))
+
+          p = Path('codex-rs/core/src/client.rs')
+          s = p.read_text()
+          marker = '        if !allow_empty_delta && incremental_items.is_empty() {\n            return None;\n        }'
+          if marker not in s:
+              raise SystemExit('production insertion marker not found')
+          fix = '''        // Compaction items replace model context rather than extend the context behind
+        // `previous_response_id`. Sending them as a websocket delta can omit request-local
+        // prefix items such as Responses Lite `AdditionalTools`, so force a full request.
+        if incremental_items.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+            )
+        }) {
+            trace!("incremental request failed, context replacement requires full request");
+            return None;
+        }
+
+''' + marker
+          p.write_text(s.replace(marker, fix, 1))
+          PY
+
+      - name: GREEN - focused compaction regression
+        run: cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
+
+      - name: GREEN - ordinary incremental regression
         run: cargo test -p codex-core websocket_incremental_request_keeps_ordinary_extension_optimization --lib --no-fail-fast
 
       - name: GREEN - full codex-core library suite
@@ -53,13 +250,15 @@ jobs:
       - name: GREEN - format
         run: cargo fmt --all -- --check
 
-      - name: Commit GREEN and remove temporary harness
+      - name: Commit verified production changes
         shell: bash
         run: |
           git config user.name 'fscfede-beep'
-          git config user.email '293577326+fscfede-beep@users.noreply.github.com'
-          rm -f red.patch green.patch .github/workflows/issue-35751-one-shot.yml
+          git config user.email 'fscfede-beep@users.noreply.github.com'
+          git rm -f .github/workflows/issue-35751-one-shot.yml
+          git rm -f red.patch green.patch 2>/dev/null || true
           git add codex-rs/core/src/client.rs codex-rs/core/src/client_tests.rs
           git add -u
+          git diff --cached --check
           git commit -m 'fix: preserve websocket tools across compaction context replacement'
           git push origin HEAD
