@@ -110,6 +110,44 @@ impl PidBackend {
         }
     }
 
+    #[cfg(unix)]
+    pub(crate) async fn adopt_running_app_server(&self) -> Result<bool> {
+        if !matches!(self.command_kind, PidCommandKind::AppServer { .. }) {
+            return Ok(false);
+        }
+        let Some((pid, process_start_time, executable_identity)) =
+            find_matching_app_server(&self.codex_bin, &self.command_args()).await?
+        else {
+            return Ok(false);
+        };
+
+        let reservation_lock = self.acquire_reservation_lock().await?;
+        if !matches!(
+            self.read_pid_file_state_with_lock_held().await?,
+            PidFileState::Missing
+        ) {
+            drop(reservation_lock);
+            return Ok(false);
+        }
+
+        let record = PidRecord {
+            pid,
+            process_start_time,
+            executable_identity: Some(executable_identity),
+        };
+        let contents =
+            serde_json::to_vec(&record).context("failed to serialize adopted pid record")?;
+        let temp_pid_file = self.pid_file.with_extension("pid.adopt.tmp");
+        fs::write(&temp_pid_file, &contents)
+            .await
+            .with_context(|| format!("failed to write adopted pid temp file {}", temp_pid_file.display()))?;
+        fs::rename(&temp_pid_file, &self.pid_file)
+            .await
+            .with_context(|| format!("failed to publish adopted pid file {}", self.pid_file.display()))?;
+        drop(reservation_lock);
+        Ok(true)
+    }
+
     pub(crate) async fn is_starting_or_running(&self) -> Result<bool> {
         loop {
             match self.read_pid_file_state().await? {
@@ -557,6 +595,67 @@ async fn process_matches_record(record: &PidRecord) -> Result<bool> {
         Err(_err) if !process_exists(record.pid) => Ok(false),
         Err(err) => Err(err),
     }
+}
+
+#[cfg(unix)]
+async fn find_matching_app_server(
+    codex_bin: &Path,
+    command_args: &[&'static str],
+) -> Result<Option<(u32, String, ExecutableIdentity)>> {
+    let expected_bin = fs::canonicalize(codex_bin)
+        .await
+        .unwrap_or_else(|_| codex_bin.to_path_buf());
+    let mut matches = Vec::new();
+    let mut entries = fs::read_dir("/proc").await.context("failed to scan /proc")?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+
+        let proc_dir = entry.path();
+        let exe_path = match fs::canonicalize(proc_dir.join("exe")).await {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if exe_path != expected_bin {
+            continue;
+        }
+
+        let raw_cmdline = match fs::read(proc_dir.join("cmdline")).await {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let argv = raw_cmdline
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect::<Vec<_>>();
+        if argv.len() != command_args.len() + 1
+            || argv[0] != expected_bin.to_string_lossy()
+            || argv[1..]
+                .iter()
+                .zip(command_args)
+                .any(|(actual, expected)| actual != expected)
+        {
+            continue;
+        }
+
+        let process_start_time = match read_process_start_time(pid).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let executable_identity =
+            match crate::managed_install::executable_identity(&expected_bin).await {
+                Ok(identity) => identity,
+                Err(_) => continue,
+            };
+        matches.push((pid, process_start_time, executable_identity));
+        if matches.len() > 1 {
+            return Ok(None);
+        }
+    }
+    Ok(matches.pop())
 }
 
 #[cfg(not(any(unix, windows)))]
