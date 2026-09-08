@@ -8,6 +8,8 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+
+use crate::managed_install::ExecutableIdentity;
 #[cfg(any(unix, windows))]
 use codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
 use serde::Deserialize;
@@ -131,7 +133,11 @@ impl PidBackend {
             drop(reservation_lock);
             return Ok(false);
         }
-        let record = PidRecord { pid, process_start_time };
+        let record = PidRecord {
+            pid,
+            process_start_time,
+            executable_identity: None,
+        };
         let contents = serde_json::to_vec(&record).context("failed to serialize adopted pid record")?;
         let temp_pid_file = self.pid_file.with_extension("pid.adopt.tmp");
         fs::write(&temp_pid_file, &contents).await
