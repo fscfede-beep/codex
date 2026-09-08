@@ -141,7 +141,6 @@ fn invalid_response_becomes_remote_control_jsonrpc_error() {
                     platform_family: "unix".to_string(),
                     platform_os: "linux".to_string(),
                     process_id: Some(1),
-                    process_id: Some(1),
                 })),
             })),
         },
