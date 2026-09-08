@@ -182,15 +182,43 @@ pub(super) async fn validate_thread_for_paginated_reads(
     let Some(state_db) = store.state_db().await else {
         return Err(ThreadStoreError::Unsupported { operation });
     };
-    let Some(metadata) =
-        state_db
-            .get_thread(thread_id)
-            .await
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!("failed to read thread metadata: {err}"),
-            })?
-    else {
-        return Err(ThreadStoreError::Unsupported { operation });
+    let metadata = state_db
+        .get_thread(thread_id)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to read thread metadata: {err}"),
+        })?;
+    let metadata = match metadata {
+        Some(metadata) => metadata,
+        None => {
+            // A rollout may already exist on disk while its SQLite metadata projection is
+            // missing because startup migration was skipped, deferred, or interrupted.
+            // Repair only the requested thread before declaring paginated history unsupported.
+            let report = store
+                .migrate_rollouts(crate::local::RolloutMigrationOptions {
+                    mode: crate::local::RolloutMigrationMode::Apply,
+                    thread_ids: vec![thread_id],
+                    max_mib_per_second: None,
+                })
+                .await?;
+            if !report.outcomes.iter().any(|outcome| {
+                outcome.thread_id == Some(thread_id)
+                    && matches!(
+                        outcome.status,
+                        crate::local::RolloutMigrationStatus::Migrated
+                            | crate::local::RolloutMigrationStatus::AlreadyPaginated
+                    )
+            }) {
+                return Err(ThreadStoreError::Unsupported { operation });
+            }
+            state_db
+                .get_thread(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to reread thread metadata after migration: {err}"),
+                })?
+                .ok_or(ThreadStoreError::Unsupported { operation })?
+        }
     };
     if metadata.archived_at.is_some() && !include_archived {
         return Err(ThreadStoreError::InvalidRequest {
