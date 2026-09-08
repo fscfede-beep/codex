@@ -1084,6 +1084,8 @@ mod tests {
     fn restart_decision_preserves_forced_refreshes() {
         let current_info = ProbeInfo {
             app_server_version: "0.1.0".to_string(),
+            process_id: None,
+            codex_home: std::path::PathBuf::from("/tmp/codex").into(),
         };
 
         assert_eq!(
