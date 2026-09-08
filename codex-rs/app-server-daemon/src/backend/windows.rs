@@ -41,6 +41,7 @@ use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::System::Threading::GetProcessTimes;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
+use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
 use windows_sys::Win32::System::Threading::PROCESS_ACCESS_RIGHTS;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
@@ -134,6 +135,35 @@ impl Process {
         Ok(Some(Self(unsafe {
             OwnedHandle::from_raw_handle(handle as _)
         })))
+    }
+
+    pub(super) fn executable_path(&self) -> Result<std::path::PathBuf> {
+        let mut size = 32_768u32;
+        loop {
+            let mut buffer = vec![0u16; size as usize];
+            let mut len = size;
+            if unsafe {
+                QueryFullProcessImageNameW(
+                    self.0.as_raw_handle() as _,
+                    0,
+                    buffer.as_mut_ptr(),
+                    &mut len,
+                )
+            } != 0
+            {
+                buffer.truncate(len as usize);
+                return Ok(std::path::PathBuf::from(
+                    String::from_utf16(&buffer)
+                        .context("managed process executable path was not utf-16")?,
+                ));
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(122) && size < 262_144 {
+                size *= 2;
+                continue;
+            }
+            return Err(err).context("failed to query managed process executable path");
+        }
     }
 
     pub(super) fn start_time(&self) -> Result<String> {
