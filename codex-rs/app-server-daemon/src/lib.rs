@@ -733,6 +733,14 @@ impl Daemon {
         if backend.is_starting_or_running().await? {
             return Ok(Some(backend));
         }
+
+        #[cfg(unix)]
+        if client::probe(&self.socket_path).await.is_ok()
+            && backend.adopt_running_app_server().await?
+        {
+            return Ok(Some(backend));
+        }
+
         Ok(None)
     }
 
