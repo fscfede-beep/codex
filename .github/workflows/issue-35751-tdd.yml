@@ -24,10 +24,19 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - name: Confirm RED regression exists
+      - name: Confirm regression exists
         shell: bash
         run: |
           grep -q 'websocket_incremental_request_for_context_replacement_forces_full_resend' codex-rs/core/src/client_tests.rs
+          grep -q 'websocket_incremental_request_keeps_ordinary_extension_optimization' codex-rs/core/src/client_tests.rs
+      - name: RED - prove regression fails before fix
+        shell: bash
+        run: |
+          set +e
+          cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
+          status=$?
+          set -e
+          test "$status" -ne 0
       - name: GREEN - apply minimal production fix
         shell: bash
         run: |
@@ -57,7 +66,7 @@ jobs:
               raise SystemExit('production insertion marker not found')
           p.write_text(s.replace(needle, replacement, 1))
           PY
-      - name: GREEN - verify regression
+      - name: GREEN - verify regression and format
         shell: bash
         run: |
           cargo test -p codex-core websocket_incremental_request_for_context_replacement_forces_full_resend --lib --no-fail-fast
