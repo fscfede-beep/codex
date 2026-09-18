@@ -436,7 +436,8 @@ mod tests {
         let managed_root = home.path().join("attachments");
         let target = managed_root.join("id").join("file.txt");
         assert!(!managed_root.exists());
-        ensure_managed_storage_root_exists(&managed_root).map_err(|err| io::Error::other(err.to_string()))?;
+        ensure_managed_storage_root_exists(&managed_root)
+            .map_err(|err| io::Error::other(err.to_string()))?;
         assert!(managed_root.is_dir());
         assert!(validate_managed_storage_path(&target, &managed_root).is_ok());
         Ok(())
