@@ -1253,7 +1253,7 @@ pub fn print_summary(
         let action = match invocation::maybe_parse_apply_patch_verified(
             &["apply_patch".to_string(), patch.to_string()],
             &cwd,
-            &codex_exec_server::LOCAL_FS,
+            codex_exec_server::LOCAL_FS.as_ref(),
             Some(&sandbox),
         )
         .await
