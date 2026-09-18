@@ -121,6 +121,14 @@ impl Sandboxable for ApplyPatchRuntime {
     fn escalate_on_failure(&self) -> bool {
         true
     }
+
+    fn unsandboxed_execution_allowed_for_request(
+        &self,
+        req: &ApplyPatchRequest,
+        ambient_allowed: bool,
+    ) -> bool {
+        ambient_allowed && !req.action.has_destructive_changes()
+    }
 }
 
 impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
@@ -172,6 +180,12 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         attempt: &SandboxAttempt<'_>,
         _ctx: &ToolCtx,
     ) -> Result<ApplyPatchRuntimeOutput, ToolError> {
+        if req.action.has_destructive_changes() && !attempt.sandbox_requested {
+            return Err(ToolError::Rejected(
+                "destructive apply_patch requires an enforced filesystem sandbox".to_string(),
+            ));
+        }
+
         let started_at = Instant::now();
         let fs = req.turn_environment.environment.get_filesystem();
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
@@ -183,12 +197,13 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
                 update_file_mode: req.action.update_file_mode(),
                 // Only reject links when an otherwise-required sandbox was bypassed.
                 // Executor-managed sandboxes can have SandboxType::None.
-                follow_symlinks: attempt.sandbox_requested
-                    || !attempt.manager.should_sandbox(
-                        attempt.permissions,
-                        self.sandbox_preference(),
-                        attempt.enforce_managed_network,
-                    ),
+                follow_symlinks: !req.action.has_destructive_changes()
+                    && (attempt.sandbox_requested
+                        || !attempt.manager.should_sandbox(
+                            attempt.permissions,
+                            self.sandbox_preference(),
+                            attempt.enforce_managed_network,
+                        )),
             },
             &req.action.cwd,
             &mut stdout,

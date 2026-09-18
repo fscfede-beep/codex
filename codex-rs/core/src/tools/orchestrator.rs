@@ -236,8 +236,12 @@ impl ToolOrchestrator {
         }
 
         // 2) First attempt under the selected sandbox.
-        let unsandboxed_allowed =
+        let ambient_unsandboxed_allowed =
             !owner_network_policy && unsandboxed_execution_allowed(&file_system_sandbox_policy);
+        let unsandboxed_allowed = tool.unsandboxed_execution_allowed_for_request(
+            req,
+            /*ambient_allowed*/ ambient_unsandboxed_allowed,
+        );
         let sandbox_override = if unsandboxed_allowed {
             sandbox_override_for_first_attempt(
                 tool.sandbox_permissions(req),

@@ -345,6 +345,17 @@ pub(crate) trait Sandboxable {
     fn escalate_on_failure(&self) -> bool {
         true
     }
+
+    /// Request-aware gate for moving an execution from a sandboxed attempt
+    /// to the host/unsandboxed path. Destructive tools can permanently deny
+    /// this transition while preserving the generic default.
+    fn unsandboxed_execution_allowed_for_request<Req>(
+        &self,
+        _req: &Req,
+        ambient_allowed: bool,
+    ) -> bool {
+        ambient_allowed
+    }
 }
 
 pub(crate) struct ToolCtx {
