@@ -167,7 +167,6 @@ pub(crate) enum ApprovalCacheKey {
 
 impl ApprovalAction {
     fn requires_fresh_human_approval(&self) -> bool {
-    fn requires_fresh_human_approval(&self) -> bool {
         matches!(
             self,
             Self::ApplyPatch { changes, .. }
@@ -203,7 +202,7 @@ impl ApprovalAction {
         }
     }
 
-}    pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
+    pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
             Self::ExecCommand {
                 hook_command,
