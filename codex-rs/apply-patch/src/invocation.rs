@@ -12,6 +12,7 @@ use crate::ApplyPatchAction;
 use crate::ApplyPatchArgs;
 use crate::ApplyPatchError;
 use crate::ApplyPatchFileChange;
+use crate::DestructivePatchTarget;
 use crate::ApplyPatchFileUpdate;
 use crate::ApplyPatchFileUpdateMode;
 use crate::IoError;
@@ -230,6 +231,7 @@ async fn try_verify_apply_patch_args(
         .transpose()?
         .unwrap_or_else(|| cwd.clone());
     let mut changes = HashMap::new();
+    let mut destructive_targets = Vec::new();
     for hunk in hunks {
         let path = hunk.resolve_path(&effective_cwd)?;
         if changes.contains_key(&path) {
@@ -241,9 +243,13 @@ async fn try_verify_apply_patch_args(
         }
         match hunk {
             Hunk::AddFile { contents, .. } => {
+                destructive_targets.push(capture_destructive_target(&path, fs, sandbox).await?);
                 changes.insert(path, ApplyPatchFileChange::Add { content: contents });
             }
             Hunk::DeleteFile { .. } => {
+                destructive_targets.push(
+                    capture_existing_destructive_target(&path, fs, sandbox).await?
+                );
                 let content = fs
                     .read_file_text(&path, Default::default(), sandbox)
                     .await
@@ -261,6 +267,11 @@ async fn try_verify_apply_patch_args(
             Hunk::UpdateFile {
                 move_path, chunks, ..
             } => {
+                let destructive_source = if move_path.is_some() {
+                    Some(capture_existing_destructive_target(&path, fs, sandbox).await?)
+                } else {
+                    None
+                };
                 let ApplyPatchFileUpdate {
                     unified_diff,
                     content: contents,
@@ -273,6 +284,15 @@ async fn try_verify_apply_patch_args(
                     sandbox,
                 )
                 .await?;
+                if let Some(source) = destructive_source {
+                    destructive_targets.push(source);
+                    if let Some(dest) = move_path {
+                        let dest_uri = effective_cwd.join(&dest.to_string_lossy())?;
+                        destructive_targets.push(
+                            capture_destructive_target(&dest_uri, fs, sandbox).await?
+                        );
+                    }
+                }
                 changes.insert(
                     path,
                     ApplyPatchFileChange::Update {
@@ -288,10 +308,128 @@ async fn try_verify_apply_patch_args(
     }
     Ok(ApplyPatchAction {
         changes,
+        destructive_targets,
         update_file_mode,
         patch,
         cwd: effective_cwd,
     })
+}
+
+async fn capture_existing_destructive_target(
+    path: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&codex_exec_server::FileSystemSandboxContext>,
+) -> Result<DestructivePatchTarget, ApplyPatchError> {
+    let metadata = fs
+        .get_metadata(path, GetMetadataOptions { follow_symlinks: false }, sandbox)
+        .await
+        .map_err(|source| ApplyPatchError::IoError(IoError {
+            context: format!("Failed to inspect destructive target {}", path.inferred_native_path_string()),
+            source,
+        }))?;
+    if metadata.is_symlink || !metadata.is_file || metadata.is_directory {
+        return Err(ApplyPatchError::IoError(IoError {
+            context: format!("Unsafe destructive target {}", path.inferred_native_path_string()),
+            source: std::io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destructive apply_patch requires a regular non-symlink file target",
+            ),
+        }));
+    }
+    let identity = fs
+        .get_object_identity(path, sandbox)
+        .await
+        .map_err(|source| ApplyPatchError::IoError(IoError {
+            context: format!("Failed to identify destructive target {}", path.inferred_native_path_string()),
+            source,
+        }))?
+        .ok_or_else(|| ApplyPatchError::IoError(IoError {
+            context: format!("Cannot prove destructive target identity for {}", path.inferred_native_path_string()),
+            source: std::io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive apply_patch requires executor-provided object identity",
+            ),
+        }))?;
+    Ok(DestructivePatchTarget::existing(path.clone(), identity))
+}
+
+async fn capture_destructive_target(
+    path: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&codex_exec_server::FileSystemSandboxContext>,
+) -> Result<DestructivePatchTarget, ApplyPatchError> {
+    match fs
+        .get_metadata(path, GetMetadataOptions { follow_symlinks: false }, sandbox)
+        .await
+    {
+        Ok(metadata) => {
+            if metadata.is_symlink || metadata.is_directory || !metadata.is_file {
+                return Err(ApplyPatchError::IoError(IoError {
+                    context: format!("Unsafe destructive target {}", path.inferred_native_path_string()),
+                    source: std::io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "destructive apply_patch requires a regular non-symlink file target",
+                    ),
+                }));
+            }
+            let identity = fs
+                .get_object_identity(path, sandbox)
+                .await
+                .map_err(|source| ApplyPatchError::IoError(IoError {
+                    context: format!("Failed to identify destructive target {}", path.inferred_native_path_string()),
+                    source,
+                }))?
+                .ok_or_else(|| ApplyPatchError::IoError(IoError {
+                    context: format!("Cannot prove destructive target identity for {}", path.inferred_native_path_string()),
+                    source: std::io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "destructive apply_patch requires executor-provided object identity",
+                    ),
+                }))?;
+            Ok(DestructivePatchTarget::existing(path.clone(), identity))
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| ApplyPatchError::IoError(IoError {
+                context: format!("Cannot establish parent for {}", path.inferred_native_path_string()),
+                source: std::io::Error::new(io::ErrorKind::InvalidInput, "destructive target has no parent"),
+            }))?;
+            let parent_metadata = fs
+                .get_metadata(&parent, GetMetadataOptions { follow_symlinks: false }, sandbox)
+                .await
+                .map_err(|source| ApplyPatchError::IoError(IoError {
+                    context: format!("Failed to inspect parent {}", parent.inferred_native_path_string()),
+                    source,
+                }))?;
+            if parent_metadata.is_symlink || !parent_metadata.is_directory {
+                return Err(ApplyPatchError::IoError(IoError {
+                    context: format!("Unsafe parent {}", parent.inferred_native_path_string()),
+                    source: std::io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "destructive apply_patch requires an existing regular parent directory",
+                    ),
+                }));
+            }
+            let identity = fs
+                .get_object_identity(&parent, sandbox)
+                .await
+                .map_err(|source| ApplyPatchError::IoError(IoError {
+                    context: format!("Failed to identify parent {}", parent.inferred_native_path_string()),
+                    source,
+                }))?
+                .ok_or_else(|| ApplyPatchError::IoError(IoError {
+                    context: format!("Cannot prove parent identity for {}", parent.inferred_native_path_string()),
+                    source: std::io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "destructive apply_patch requires executor-provided parent identity",
+                    ),
+                }))?;
+            Ok(DestructivePatchTarget::missing_parent(path.clone(), identity))
+        }
+        Err(source) => Err(ApplyPatchError::IoError(IoError {
+            context: format!("Failed to inspect destructive target {}", path.inferred_native_path_string()),
+            source,
+        })),
+    }
 }
 
 /// Extract the heredoc body (and optional `cd` workdir) from a `bash -lc` script
