@@ -824,7 +824,10 @@ impl Session {
                             ctx.call_id.clone(),
                             changes.as_ref().clone(),
                             reason.or_else(|| {
-                                Some("destructive apply_patch requires fresh human approval".to_string())
+                                Some(
+                                    "destructive apply_patch requires fresh human approval"
+                                        .to_string(),
+                                )
                             }),
                             /*grant_root*/ None,
                         )
