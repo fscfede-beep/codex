@@ -204,6 +204,20 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRuntime<'a> {
+    fn requires_filesystem_safety_fence(&self, _req: &UnifiedExecRequest) -> bool {
+        // Arbitrary binaries and scripts can delete files without matching a command heuristic.
+        // Keep all unified-exec launches behind the OS delete fence.
+        true
+    }
+
+    fn allow_destructive_filesystem_effects(
+        &self,
+        req: &UnifiedExecRequest,
+        already_approved: bool,
+    ) -> bool {
+        already_approved && codex_shell_command::is_destructive_delete_command(&req.command)
+    }
+
     fn turn_environment<'b>(&self, req: &'b UnifiedExecRequest) -> &'b TurnEnvironment {
         &req.turn_environment
     }
