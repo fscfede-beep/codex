@@ -152,9 +152,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     eprintln!(
                         "Error: destructive apply_patch execution requires the main Codex approval and sandbox path."
                     );
-                    return 1;
-                }
-                match runtime.block_on(codex_apply_patch::apply_patch_with_options(
+                    1
+                } else {
+                    match runtime.block_on(codex_apply_patch::apply_patch_with_options(
                     &patch_arg,
                     codex_apply_patch::ApplyPatchOptions {
                         update_file_mode,
@@ -163,11 +163,12 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     &cwd,
                     &mut stdout,
                     &mut stderr,
-                    codex_exec_server::LOCAL_FS.as_ref(),
-                    /*sandbox*/ None,
-                )) {
-                    Ok(_) => 0,
-                    Err(_) => 1,
+                        codex_exec_server::LOCAL_FS.as_ref(),
+                        /*sandbox*/ None,
+                    )) {
+                        Ok(_) => 0,
+                        Err(_) => 1,
+                    }
                 }
             }
             None => {
