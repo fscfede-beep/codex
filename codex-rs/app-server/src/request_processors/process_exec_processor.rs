@@ -71,6 +71,13 @@ impl ProcessExecRequestProcessor {
         request_id: ConnectionRequestId,
         params: ProcessSpawnParams,
     ) -> Result<(), JSONRPCErrorError> {
+        // P0 fail-closed: process/spawn currently launches raw PTY/pipe processes
+        // outside the Codex approval + sandbox orchestration chain. Do not allow
+        // this experimental surface to create an unsandboxed process until it
+        // is wired through the same governed execution path.
+        return Err(invalid_request(
+            "process/spawn is disabled: scoped process/filesystem sandbox and approval integration are required",
+        ));
         self.require_local_environment()?;
         let ProcessSpawnParams {
             command,
