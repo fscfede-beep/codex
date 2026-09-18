@@ -28,7 +28,10 @@ use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::RemoveOptions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_path_uri::PathUri;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -71,6 +74,23 @@ impl FsRequestProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         validate_managed_storage_path(path.as_path(), &self.managed_storage_root)
     }
+    fn managed_storage_sandbox(&self) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
+        let root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
+            &self.managed_storage_root,
+        )
+        .map_err(|err| invalid_request(format!("invalid CODEX_HOME attachments root: {err}")))?;
+        let root_uri = PathUri::from_abs_path(&root);
+        let permissions = PermissionProfile::workspace_write_with_path_uris(
+            std::slice::from_ref(&root_uri),
+            NetworkSandboxPolicy::Restricted,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        Ok(FileSystemSandboxContext::from_permission_profile(
+            permissions,
+            root_uri,
+        ))
+    }
 
     pub(crate) async fn read_file(
         &self,
@@ -97,9 +117,10 @@ impl FsRequestProcessor {
             ))
         })?;
         self.validate_managed_storage_path(&params.path)?;
+        let sandbox = self.managed_storage_sandbox()?;
         let path = PathUri::from_abs_path(&params.path);
         self.file_system()?
-            .write_file(&path, bytes, Default::default(), /*sandbox*/ None)
+            .write_file(&path, bytes, Default::default(), Some(&sandbox))
             .await
             .map_err(map_fs_error)?;
         Ok(FsWriteFileResponse {})
@@ -110,6 +131,7 @@ impl FsRequestProcessor {
         params: FsCreateDirectoryParams,
     ) -> Result<FsCreateDirectoryResponse, JSONRPCErrorError> {
         self.validate_managed_storage_path(&params.path)?;
+        let sandbox = self.managed_storage_sandbox()?;
         let path = PathUri::from_abs_path(&params.path);
         self.file_system()?
             .create_directory(
@@ -118,7 +140,7 @@ impl FsRequestProcessor {
                     recursive: params.recursive.unwrap_or(true),
                     follow_symlinks: true,
                 },
-                /*sandbox*/ None,
+                Some(&sandbox),
             )
             .await
             .map_err(map_fs_error)?;
@@ -181,6 +203,7 @@ impl FsRequestProcessor {
     ) -> Result<FsCopyResponse, JSONRPCErrorError> {
         self.validate_managed_storage_path(&params.source_path)?;
         self.validate_managed_storage_path(&params.destination_path)?;
+        let sandbox = self.managed_storage_sandbox()?;
         let source_path = PathUri::from_abs_path(&params.source_path);
         let destination_path = PathUri::from_abs_path(&params.destination_path);
         self.file_system()?
@@ -190,7 +213,7 @@ impl FsRequestProcessor {
                 CopyOptions {
                     recursive: params.recursive,
                 },
-                /*sandbox*/ None,
+                Some(&sandbox),
             )
             .await
             .map_err(map_fs_error)?;
