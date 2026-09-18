@@ -432,6 +432,33 @@ pub async fn apply_patch_with_options(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_patch_with_destructive_targets(
+        patch,
+        options,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+        &[],
+    )
+    .await
+}
+
+/// Applies a verified patch with the destructive object preconditions captured before approval.
+///
+/// Destructive patches must come through this entry point. The standalone/legacy entry point
+/// intentionally has no way to mint these preconditions and therefore fails closed.
+pub async fn apply_patch_with_destructive_targets(
+    patch: &str,
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let hunks = match parse_patch(patch) {
         Ok(source) => source.hunks,
         Err(e) => {
@@ -459,7 +486,17 @@ pub async fn apply_patch_with_options(
         }
     };
 
-    apply_hunks_with_options(&hunks, options, cwd, stdout, stderr, fs, sandbox).await
+    apply_hunks_with_options_and_destructive_targets(
+        &hunks,
+        options,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+        destructive_targets,
+    )
+    .await
 }
 
 /// Applies hunks and continues to update stdout/stderr
@@ -494,8 +531,41 @@ async fn apply_hunks_with_options(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_hunks_with_options_and_destructive_targets(
+        hunks,
+        options,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+        &[],
+    )
+    .await
+}
+
+async fn apply_hunks_with_options_and_destructive_targets(
+    hunks: &[Hunk],
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
+    match apply_hunks_to_files(
+        hunks,
+        options,
+        cwd,
+        fs,
+        sandbox,
+        destructive_targets,
+        &mut delta,
+    )
+    .await
+    {
         Ok(affected_paths) => {
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
@@ -538,6 +608,7 @@ async fn apply_hunks_to_files(
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
     delta: &mut AppliedPatchDelta,
 ) -> anyhow::Result<AffectedPaths> {
     let ApplyPatchOptions {
@@ -546,6 +617,11 @@ async fn apply_hunks_to_files(
     } = options;
     if hunks.is_empty() {
         anyhow::bail!("No files were modified.");
+    }
+    if hunks.iter().any(hunk_is_destructive) && destructive_targets.is_empty() {
+        anyhow::bail!(
+            "destructive apply_patch requires preflight object-identity authorization"
+        );
     }
 
     let mut added: Vec<PathBuf> = Vec::new();
@@ -571,6 +647,8 @@ async fn apply_hunks_to_files(
         let path_uri = hunk.resolve_path(cwd)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
+                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 let overwritten_content = read_optional_file_text_for_delta(
                     &path_uri,
                     fs,
@@ -599,6 +677,8 @@ async fn apply_hunks_to_files(
                 added.push(affected_path);
             }
             Hunk::DeleteFile { .. } => {
+                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 note_existing_path_delta_support(
                     &path_uri,
                     fs,
@@ -683,6 +763,8 @@ async fn apply_hunks_to_files(
                 .await?;
                 if let Some(dest) = move_path {
                     let dest_uri = cwd.join(&dest.to_string_lossy())?;
+                    let dest_target = destructive_target_for_path(destructive_targets, &dest_uri)?;
+                    revalidate_destructive_target(dest_target, fs, sandbox).await?;
                     let overwritten_move_content = read_optional_file_text_for_delta(
                         &dest_uri,
                         fs,
@@ -717,6 +799,8 @@ async fn apply_hunks_to_files(
                                 path_uri.inferred_native_path_string()
                             )
                         })?;
+                    let source_target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                    revalidate_destructive_target(source_target, fs, sandbox).await?;
                     if let Err(error) = fs
                         .remove(
                             &path_uri,
@@ -788,6 +872,100 @@ async fn apply_hunks_to_files(
         modified,
         deleted,
     })
+}
+
+fn hunk_is_destructive(hunk: &Hunk) -> bool {
+    match hunk {
+        Hunk::AddFile { .. } | Hunk::DeleteFile { .. } => true,
+        Hunk::UpdateFile { move_path: Some(_), .. } => true,
+        Hunk::UpdateFile { move_path: None, .. } => false,
+    }
+}
+
+fn destructive_target_for_path<'a>(
+    targets: &'a [DestructivePatchTarget],
+    path: &PathUri,
+) -> anyhow::Result<&'a DestructivePatchTarget> {
+    targets.iter().find(|target| target.path() == path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing destructive precondition for {}",
+            path.inferred_native_path_string()
+        )
+    })
+}
+
+async fn revalidate_destructive_target(
+    target: &DestructivePatchTarget,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> anyhow::Result<()> {
+    match target.state() {
+        DestructivePatchTargetState::Existing(expected) => {
+            let metadata = fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions { follow_symlinks: false },
+                    sandbox,
+                )
+                .await?;
+            if metadata.is_symlink || !metadata.is_file || metadata.is_directory {
+                anyhow::bail!(
+                    "destructive target changed type: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+            let actual = fs
+                .get_object_identity(target.path(), sandbox)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "executor cannot prove object identity for {}",
+                    target.path().inferred_native_path_string()
+                ))?;
+            if &actual != expected {
+                anyhow::bail!(
+                    "destructive target identity changed: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+        }
+        DestructivePatchTargetState::MissingParent(expected_parent) => {
+            match fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions { follow_symlinks: false },
+                    sandbox,
+                )
+                .await
+            {
+                Ok(_) => anyhow::bail!(
+                    "destructive create target appeared before execution: {}",
+                    target.path().inferred_native_path_string()
+                ),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let parent = target.path().parent().ok_or_else(|| {
+                anyhow::anyhow!("destructive target has no parent")
+            })?;
+            let parent_metadata = fs
+                .get_metadata(&parent, GetMetadataOptions { follow_symlinks: false }, sandbox)
+                .await?;
+            if parent_metadata.is_symlink || !parent_metadata.is_directory {
+                anyhow::bail!("destructive parent changed type: {}", parent.inferred_native_path_string());
+            }
+            let actual_parent = fs
+                .get_object_identity(&parent, sandbox)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "executor cannot prove parent identity for {}",
+                    parent.inferred_native_path_string()
+                ))?;
+            if &actual_parent != expected_parent {
+                anyhow::bail!("destructive parent identity changed: {}", parent.inferred_native_path_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn ensure_not_directory(
