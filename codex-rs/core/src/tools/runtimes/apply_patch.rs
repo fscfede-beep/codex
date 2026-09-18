@@ -204,7 +204,8 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_options(
+        let result = if self.destructive {
+            codex_apply_patch::apply_patch_with_destructive_targets(
             &req.action.patch,
             ApplyPatchOptions {
                 update_file_mode: req.action.update_file_mode(),
@@ -222,8 +223,29 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             &mut stderr,
             fs.as_ref(),
             sandbox.as_ref(),
-        )
-        .await;
+            req.action.destructive_targets(),
+            )
+            .await
+        } else {
+            codex_apply_patch::apply_patch_with_options(
+                &req.action.patch,
+                ApplyPatchOptions {
+                    update_file_mode: req.action.update_file_mode(),
+                    follow_symlinks: attempt.sandbox_requested
+                        || !attempt.manager.should_sandbox(
+                            attempt.permissions,
+                            self.sandbox_preference(),
+                            attempt.enforce_managed_network,
+                        ),
+                },
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+            )
+            .await
+        };
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let failed = result.is_err();
