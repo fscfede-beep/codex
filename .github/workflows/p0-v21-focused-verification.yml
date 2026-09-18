@@ -43,6 +43,10 @@ jobs:
         working-directory: codex-rs
         run: cargo test -p codex-core destructive_patch --lib
 
+      - name: Test destructive interactive input controls
+        working-directory: codex-rs
+        run: cargo test -p codex-core destructive_interactive_inputs_are_classified_fail_closed --lib
+
       - name: Test apply-patch package
         working-directory: codex-rs
         run: cargo test -p codex-apply-patch --lib
