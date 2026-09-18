@@ -345,9 +345,7 @@ fn require_scoped_delete_sandbox(
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<&FileSystemSandboxContext, JSONRPCErrorError> {
     let sandbox = sandbox.ok_or_else(|| {
-        invalid_request(
-            "fs/remove requires an explicit restricted filesystem sandbox",
-        )
+        invalid_request("fs/remove requires an explicit restricted filesystem sandbox")
     })?;
     sandbox
         .validate_file_system_paths_for_current_host()
