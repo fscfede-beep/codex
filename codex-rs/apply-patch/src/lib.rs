@@ -219,6 +219,24 @@ impl ApplyPatchAction {
         self.update_file_mode
     }
 
+    /// True when applying this patch can delete or replace an existing filesystem object.
+    ///
+    /// AddFile is included because the current implementation writes the target path directly
+    /// and therefore may overwrite an existing file.
+    pub fn is_destructive(&self) -> bool {
+        self.changes.values().any(|change| {
+            matches!(
+                change,
+                ApplyPatchFileChange::Add { .. }
+                    | ApplyPatchFileChange::Delete { .. }
+                    | ApplyPatchFileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    }
+
     /// Should be used exclusively for testing. (Not worth the overhead of
     /// creating a feature flag for this.)
     pub fn new_add_for_test(path: &PathUri, content: String) -> Self {

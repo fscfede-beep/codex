@@ -452,3 +452,34 @@ fn missing_project_dot_codex_config_requires_approval() {
         SafetyCheck::AskUser,
     );
 }
+
+#[test]
+fn destructive_patch_is_never_auto_approved() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().abs();
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let action = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.join("existing.txt")),
+        "replacement".to_string(),
+    );
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let policy = permission_profile.file_system_sandbox_policy();
+
+    assert!(action.is_destructive());
+    assert_eq!(
+        assess_patch_safety(
+            &action,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &policy,
+            &local_context(&cwd_uri),
+            PatchSandboxRoute::ExecutorManaged,
+        ),
+        SafetyCheck::AskUser,
+    );
+}

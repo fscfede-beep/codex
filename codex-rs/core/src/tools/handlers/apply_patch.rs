@@ -604,7 +604,7 @@ async fn execute_verified_patch(
         permissions_preapproved: effective_additional_permissions.permissions_preapproved,
     };
     let mut orchestrator = ToolOrchestrator::new();
-    let mut runtime = ApplyPatchRuntime::new();
+    let mut runtime = ApplyPatchRuntime::new_for_action(&request.action);
     let result = orchestrator
         .run(&mut runtime, &request, &tool_ctx)
         .await

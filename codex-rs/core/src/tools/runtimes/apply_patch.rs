@@ -55,6 +55,7 @@ pub struct ApplyPatchRequest {
 #[derive(Default)]
 pub struct ApplyPatchRuntime {
     committed_delta: AppliedPatchDelta,
+    destructive: bool,
 }
 
 #[derive(Debug)]
@@ -66,6 +67,13 @@ pub struct ApplyPatchRuntimeOutput {
 impl ApplyPatchRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_for_action(action: &ApplyPatchAction) -> Self {
+        Self {
+            committed_delta: AppliedPatchDelta::default(),
+            destructive: action.is_destructive(),
+        }
     }
 
     pub fn committed_delta(&self) -> &AppliedPatchDelta {
@@ -116,10 +124,15 @@ impl ApplyPatchRuntime {
 
 impl Sandboxable for ApplyPatchRuntime {
     fn sandbox_preference(&self) -> SandboxablePreference {
-        SandboxablePreference::Auto
+        if self.destructive {
+            SandboxablePreference::Require
+        } else {
+            SandboxablePreference::Auto
+        }
     }
+
     fn escalate_on_failure(&self) -> bool {
-        true
+        !self.destructive
     }
 }
 
