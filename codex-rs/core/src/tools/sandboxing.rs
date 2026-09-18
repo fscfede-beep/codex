@@ -404,6 +404,9 @@ pub(crate) struct SandboxAttempt<'a> {
     pub windows_sandbox_private_desktop: bool,
     pub network_denial_cancellation_token: Option<CancellationToken>,
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
+    /// Per-launch destructive filesystem capability. Defaults false and is never
+    /// persisted in PermissionProfile or approval cache state.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 pub(crate) fn executor_windows_sandbox_level(
@@ -483,7 +486,7 @@ impl<'a> SandboxAttempt<'a> {
         let network = self.network_proxy(network);
         let request = self
             .manager
-            .transform(SandboxTransformRequest {
+            .transform_with_destructive_filesystem_effects(
                 command,
                 permissions: self.permissions,
                 sandbox: self.sandbox,
@@ -495,7 +498,9 @@ impl<'a> SandboxAttempt<'a> {
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
-            })
+            },
+            self.allow_destructive_filesystem_effects,
+            )
             .map_err(CodexErr::from)?;
         let workspace_roots = self
             .workspace_roots
