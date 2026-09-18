@@ -5,7 +5,6 @@ on:
     branches:
       - p0/v21-reconciled-review
       - p0/v22-destructive-scope-gate
-      - p0/v22-destructive-scope-gate
   pull_request:
     branches:
       - p0/v21-reconciled-review
@@ -39,7 +38,7 @@ jobs:
 
       - name: Compile affected crates
         working-directory: codex-rs
-        run: cargo check -p codex-apply-patch -p codex-core -p codex-exec-server -p codex-arg0 -p codex-tui
+        run: cargo check -p codex-apply-patch -p codex-core -p codex-exec-server -p codex-app-server -p codex-arg0 -p codex-tui
 
       - name: Test destructive apply_patch controls
         working-directory: codex-rs
@@ -52,3 +51,7 @@ jobs:
       - name: Test approval overlay controls
         working-directory: codex-rs
         run: cargo test -p codex-tui destructive_patch_options_are_fresh_only --lib
+
+      - name: Test process spawn fail-closed gate
+        working-directory: codex-rs
+        run: cargo test -p codex-app-server process_spawn_is_fail_closed_until_sandboxed --lib
