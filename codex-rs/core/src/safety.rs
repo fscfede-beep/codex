@@ -56,6 +56,8 @@ pub fn assess_patch_safety(
             policy,
             AskForApproval::Granular(granular_config) if !granular_config.sandbox_approval
         );
+
+    let is_destructive_patch = action.is_destructive();
     let sandbox_available = match sandbox_route {
         PatchSandboxRoute::ExecutorManaged => true,
         PatchSandboxRoute::Platform(windows_sandbox_level) => {
@@ -101,11 +103,27 @@ pub fn assess_patch_safety(
         return SafetyCheck::AskUser;
     }
 
+    let patch_is_constrained = is_write_patch_constrained_to_writable_paths(
+        action,
+        file_system_sandbox_policy,
+        context,
+    );
+
+    // Destructive patches may never be auto-approved. They require the explicit human
+    // approval/provenance path even when their targets are otherwise inside writable roots.
+    if is_destructive_patch && patch_is_constrained {
+        if rejects_sandbox_approval {
+            SafetyCheck::Reject {
+                reason: "destructive apply_patch requires fresh human approval".to_string(),
+            }
+        } else {
+            SafetyCheck::AskUser
+        }
     // Even though the patch appears to be constrained to writable paths, it is
     // possible that paths in the patch are hard links to files outside the
     // writable roots, so we should still run `apply_patch` in a sandbox in that case.
     // Disabled and External profiles intentionally do not apply an outer sandbox.
-    if is_write_patch_constrained_to_writable_paths(action, file_system_sandbox_policy, context)
+    } else if patch_is_constrained
         && (matches!(
             permission_profile,
             PermissionProfile::Disabled | PermissionProfile::External { .. }
