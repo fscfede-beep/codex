@@ -99,24 +99,23 @@ impl FsRequestProcessor {
     // The managed root itself must be a real directory, not a symlink/junction/reparse alias.
     let canonical_root = match std::fs::symlink_metadata(managed_root) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if !metadata.is_dir() || managed_root_is_alias(&metadata) {
                 return Err(invalid_request(
-                    "managed attachments root must be a real directory",
+                    "managed attachments root must be a real directory without reparse aliases",
                 ));
             }
-            let canonical = std::fs::canonicalize(managed_root).map_err(|err| {
+            std::fs::canonicalize(managed_root).map_err(|err| {
                 invalid_request(format!(
                     "cannot canonicalize managed attachments root: {err}"
                 ))
-            })?;
-            if canonical != managed_root {
-                return Err(invalid_request(
-                    "managed attachments root must not resolve through an alias",
-                ));
-            }
-            canonical
+            })?
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => managed_root.to_path_buf(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let root_name = managed_root.file_name().ok_or_else(|| {
+                invalid_request("managed filesystem root has no final path component")
+            })?;
+            canonical_home.join(root_name)
+        }
         Err(err) => {
             return Err(invalid_request(format!(
                 "cannot inspect managed attachments root: {err}"
@@ -146,16 +145,19 @@ impl FsRequestProcessor {
         ));
     }
 
-    // Reject any existing alias in the path resolution chain. This closes symlink/junction/
-    // reparse escapes even when their target remains somewhere else under CODEX_HOME.
-    if canonical_existing != existing {
+    // Reject explicit aliases in the existing path chain. Unix uses canonical-vs-lexical
+    // identity; Windows uses the native reparse-point bit so normal Win32 path normalization
+    // does not cause false positives.
+    if managed_storage_path_contains_alias(existing, &canonical_existing) {
         return Err(invalid_request(
             "filesystem mutation path contains an existing alias or reparse point",
         ));
     }
 
     if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && (metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()))
+        && (metadata.file_type().is_symlink()
+            || (!metadata.is_dir() && !metadata.is_file())
+            || managed_root_is_alias(&metadata))
     {
         return Err(invalid_request(
             "filesystem mutation target is not a supported regular filesystem object",
@@ -163,6 +165,38 @@ impl FsRequestProcessor {
     }
 
     Ok(())
+}
+
+fn managed_storage_path_contains_alias(
+    existing: &Path,
+    canonical_existing: &Path,
+) -> bool {
+    #[cfg(unix)]
+    {
+        canonical_existing != existing
+    }
+    #[cfg(windows)]
+    {
+        std::fs::symlink_metadata(existing)
+            .map(|metadata| managed_root_is_alias(&metadata))
+            .unwrap_or(true)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        canonical_existing != existing
+    }
+}
+
+fn managed_root_is_alias(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x0400 != 0;
+    }
+    false
 }
 
 fn closest_existing_ancestor(path: &Path) -> Option<&Path> {
