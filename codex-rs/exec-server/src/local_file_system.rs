@@ -3,9 +3,11 @@ use codex_file_system::MAX_WALK_DIRECTORIES;
 use codex_file_system::MAX_WALK_ENTRIES;
 use codex_file_system::MAX_WALK_RESPONSE_BYTES;
 use codex_file_system::WALK_RESPONSE_ITEM_OVERHEAD_BYTES;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
-use codex_protocol::permissions::FileSystemSandboxKind;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -1380,9 +1382,9 @@ mod delete_gate_tests {
     fn restricted_sandbox(root: &PathUri) -> FileSystemSandboxContext {
         FileSystemSandboxContext::from_permission_profile(
             PermissionProfile::from_runtime_permissions(
-                &FileSystemSandboxPolicy::restricted(vec![codex_protocol::permissions::FileSystemSandboxEntry::new(
+                &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
                     root.clone().into(),
-                    codex_protocol::permissions::FileSystemAccessMode::Write,
+                    FileSystemAccessMode::Write,
                 )]),
                 NetworkSandboxPolicy::Restricted,
             ),
@@ -1446,24 +1448,32 @@ mod delete_gate_tests {
     }
 
     #[tokio::test]
-    async fn remove_accepts_only_restricted_managed_sandbox_shape() -> io::Result<()> {
+    async fn remove_with_read_only_context_is_rejected_before_io() -> io::Result<()> {
         let temp = tempfile::tempdir()?;
+        let target = temp.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
         let root = PathUri::from_host_native_path(temp.path())?;
-        let sandbox = restricted_sandbox(&root);
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::read_only(),
+            root.clone(),
+        );
+        let path = PathUri::from_host_native_path(&target)?;
 
-        let result = LocalFileSystem::unsandboxed()
+        let error = LocalFileSystem::unsandboxed()
             .remove(
-                &root,
+                &path,
                 RemoveOptions {
-                    recursive: true,
-                    force: true,
+                    recursive: false,
+                    force: false,
                     follow_symlinks: false,
                 },
                 Some(&sandbox),
             )
-            .await;
+            .await
+            .expect_err("read-only deletion must fail closed");
 
-        assert!(result.is_err());
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(target.exists());
         Ok(())
     }
 }
