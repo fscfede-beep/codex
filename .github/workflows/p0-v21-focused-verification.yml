@@ -6,9 +6,13 @@ on:
       - p0/v21-reconciled-review
       - p0/v22-destructive-scope-gate
       - p0/v23-destructive-object-identity
+      - p0/v24-cumulative-destructive-gate
   pull_request:
     branches:
       - p0/v21-reconciled-review
+      - p0/v22-destructive-scope-gate
+      - p0/v23-destructive-object-identity
+      - p0/v24-cumulative-destructive-gate
 
 permissions:
   contents: read
@@ -44,6 +48,14 @@ jobs:
       - name: Test destructive apply_patch controls
         working-directory: codex-rs
         run: cargo test -p codex-core destructive_patch --lib
+
+      - name: Test destructive apply_patch verification preflight
+        working-directory: codex-rs
+        run: cargo test -p codex-apply-patch destructive_verification_rejects --lib
+
+      - name: Test destructive apply_patch object identity
+        working-directory: codex-rs
+        run: cargo test -p codex-apply-patch destructive_object_identity --lib
 
       - name: Test apply-patch package
         working-directory: codex-rs
