@@ -23,6 +23,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::default_exec_approval_requirement;
+use crate::tools::sandboxing::filesystem_safety_fence_permission_profile;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_otel::ToolDecisionSource;
@@ -166,12 +167,20 @@ impl ToolOrchestrator {
         let workspace_roots = environment.workspace_roots();
         let executor_managed_process_sandbox = tool.uses_executor_managed_process_sandbox(req);
         let permission_profile = environment.permission_profile();
-        let permissions = if executor_managed_process_sandbox {
+        let requires_filesystem_safety_fence = tool.requires_filesystem_safety_fence(req);
+        let mut permissions = if executor_managed_process_sandbox {
             // Executor-native roots remain symbolic until the executor applies its own sandbox.
             permission_profile.clone()
         } else {
             environment.permission_profile_with_workspace_roots()
         };
+        if requires_filesystem_safety_fence {
+            permissions = filesystem_safety_fence_permission_profile(
+                permission_profile,
+                workspace_roots,
+            )
+            .map_err(ToolError::Rejected)?;
+        }
         let file_system_sandbox_policy = permissions.file_system_sandbox_policy();
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
@@ -236,9 +245,12 @@ impl ToolOrchestrator {
         }
 
         // 2) First attempt under the selected sandbox.
-        let unsandboxed_allowed =
-            !owner_network_policy && unsandboxed_execution_allowed(&file_system_sandbox_policy);
-        let sandbox_override = if unsandboxed_allowed {
+        let unsandboxed_allowed = !requires_filesystem_safety_fence
+            && !owner_network_policy
+            && unsandboxed_execution_allowed(&file_system_sandbox_policy);
+        let sandbox_override = if requires_filesystem_safety_fence {
+            SandboxOverride::NoOverride
+        } else if unsandboxed_allowed {
             sandbox_override_for_first_attempt(
                 tool.sandbox_permissions(req),
                 &requirement,
@@ -267,7 +279,11 @@ impl ToolOrchestrator {
         } else {
             turn_ctx.network.is_some()
         };
-        let sandbox_preference = tool.sandbox_preference();
+        let sandbox_preference = if requires_filesystem_safety_fence {
+            codex_sandboxing::SandboxablePreference::Require
+        } else {
+            tool.sandbox_preference()
+        };
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
@@ -290,6 +306,14 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+        if requires_filesystem_safety_fence
+            && !executor_managed_process_sandbox
+            && initial_sandbox == SandboxType::None
+        {
+            return Err(ToolError::Rejected(
+                "filesystem safety sandbox is unavailable on this executor".to_string(),
+            ));
+        }
 
         let sandbox_policy_cwd = tool
             .sandbox_cwd(req)

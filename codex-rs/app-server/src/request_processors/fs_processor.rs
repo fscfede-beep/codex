@@ -155,22 +155,11 @@ impl FsRequestProcessor {
 
     pub(crate) async fn remove(
         &self,
-        params: FsRemoveParams,
+        _params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        let path = PathUri::from_abs_path(&params.path);
-        self.file_system()?
-            .remove(
-                &path,
-                RemoveOptions {
-                    recursive: params.recursive.unwrap_or(true),
-                    force: params.force.unwrap_or(true),
-                    follow_symlinks: true,
-                },
-                /*sandbox*/ None,
-            )
-            .await
-            .map_err(map_fs_error)?;
-        Ok(FsRemoveResponse {})
+        Err(invalid_request(
+            "fs/remove is disabled: destructive filesystem deletion requires the governed approval and sandbox path",
+        ))
     }
 
     pub(crate) async fn copy(

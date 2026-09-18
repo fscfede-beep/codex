@@ -15,10 +15,15 @@ use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::FileSystemObjectIdentity;
 use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
 pub use parser::Hunk;
@@ -187,11 +192,234 @@ pub enum MaybeApplyPatchVerified {
     NotApplyPatch,
 }
 
+/// Expected filesystem state captured while a destructive patch is verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DestructivePatchTargetState {
+    Existing(FileSystemObjectIdentity),
+    MissingParent {
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    },
+}
+
+/// One concrete target/parent precondition for a destructive patch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DestructivePatchTarget {
+    path: PathUri,
+    state: DestructivePatchTargetState,
+}
+
+impl DestructivePatchTarget {
+    pub(crate) fn existing(path: PathUri, identity: FileSystemObjectIdentity) -> Self {
+        Self {
+            path,
+            state: DestructivePatchTargetState::Existing(identity),
+        }
+    }
+
+    pub(crate) fn missing_parent(
+        path: PathUri,
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    ) -> Self {
+        Self {
+            path,
+            state: DestructivePatchTargetState::MissingParent { parent, identity },
+        }
+    }
+
+    pub(crate) fn path(&self) -> &PathUri {
+        &self.path
+    }
+
+    pub(crate) fn state(&self) -> &DestructivePatchTargetState {
+        &self.state
+    }
+}
+
+/// Reconstruct a managed workspace-only scope before destructive patch verification or mutation.
+pub(crate) fn destructive_patch_sandbox(
+    hunks: &[Hunk],
+    cwd: &PathUri,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<Option<FileSystemSandboxContext>, ApplyPatchError> {
+    let mut targets = Vec::new();
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { .. } | Hunk::DeleteFile { .. } => {
+                targets.push(hunk.resolve_path(cwd)?);
+            }
+            Hunk::UpdateFile {
+                move_path: Some(move_path),
+                ..
+            } => {
+                targets.push(hunk.resolve_path(cwd)?);
+                targets.push(cwd.join(&move_path.to_string_lossy())?);
+            }
+            Hunk::UpdateFile {
+                move_path: None, ..
+            } => {}
+        }
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let Some(sandbox) = sandbox else {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit filesystem sandbox".to_string(),
+        )
+        .into());
+    };
+    if matches!(&sandbox.permissions, PermissionProfile::External { .. }) {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires Codex-managed filesystem scope".to_string(),
+        )
+        .into());
+    }
+    if sandbox.workspace_roots.is_empty() {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit workspace root".to_string(),
+        )
+        .into());
+    }
+    let workspace_policy = FileSystemSandboxPolicy::workspace_write_with_path_uris(
+        &sandbox.workspace_roots,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let policy_context = sandbox.policy_context();
+    for target in &targets {
+        if !workspace_policy.can_write_path(target, &policy_context) {
+            return Err(ParseError::InvalidPatchError(format!(
+                "destructive apply_patch target is outside the workspace: {}",
+                target.inferred_native_path_string()
+            ))
+            .into());
+        }
+    }
+    let mut scoped = sandbox.clone();
+    scoped.permissions = PermissionProfile::from_runtime_permissions_with_enforcement(
+        SandboxEnforcement::Managed,
+        &workspace_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    scoped.workspace_roots = sandbox.workspace_roots.clone();
+    Ok(Some(scoped))
+}
+
+fn destructive_target_for_path<'a>(
+    targets: &'a [DestructivePatchTarget],
+    path: &PathUri,
+) -> anyhow::Result<&'a DestructivePatchTarget> {
+    targets
+        .iter()
+        .find(|target| target.path() == path)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "destructive apply_patch target was not present in the verified target set: {}",
+                path.inferred_native_path_string()
+            )
+        })
+}
+
+async fn revalidate_destructive_target(
+    target: &DestructivePatchTarget,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> anyhow::Result<()> {
+    match target.state() {
+        DestructivePatchTargetState::Existing(expected_identity) => {
+            let metadata = fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await?;
+            if metadata.is_symlink || !metadata.is_file || metadata.is_directory {
+                anyhow::bail!(
+                    "destructive apply_patch target changed type: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+            let actual_identity = fs
+                .get_object_identity(target.path(), sandbox)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "destructive apply_patch target identity is unavailable: {}",
+                        target.path().inferred_native_path_string()
+                    )
+                })?;
+            if &actual_identity != expected_identity {
+                anyhow::bail!(
+                    "destructive apply_patch target identity changed: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+        }
+        DestructivePatchTargetState::MissingParent { parent, identity } => {
+            match fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await
+            {
+                Ok(_) => anyhow::bail!(
+                    "destructive apply_patch target appeared after authorization: {}",
+                    target.path().inferred_native_path_string()
+                ),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let parent_metadata = fs
+                .get_metadata(
+                    parent,
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await?;
+            if parent_metadata.is_symlink || !parent_metadata.is_directory {
+                anyhow::bail!(
+                    "destructive apply_patch parent changed type: {}",
+                    parent.inferred_native_path_string()
+                );
+            }
+            let actual_identity =
+                fs.get_object_identity(parent, sandbox)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "destructive apply_patch parent identity is unavailable: {}",
+                            parent.inferred_native_path_string()
+                        )
+                    })?;
+            if &actual_identity != identity {
+                anyhow::bail!(
+                    "destructive apply_patch parent identity changed: {}",
+                    parent.inferred_native_path_string()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ApplyPatchAction is the result of parsing an `apply_patch` command. By
 /// construction, all paths should be absolute paths.
 #[derive(Debug, PartialEq)]
 pub struct ApplyPatchAction {
     changes: HashMap<PathUri, ApplyPatchFileChange>,
+    destructive_targets: Vec<DestructivePatchTarget>,
+
 
     update_file_mode: ApplyPatchFileUpdateMode,
 
@@ -214,9 +442,31 @@ impl ApplyPatchAction {
         &self.changes
     }
 
+    pub fn destructive_targets(&self) -> &[DestructivePatchTarget] {
+        &self.destructive_targets
+    }
+
     /// Returns the update mode selected while the patch was verified.
     pub fn update_file_mode(&self) -> ApplyPatchFileUpdateMode {
         self.update_file_mode
+    }
+
+    /// True when applying this patch can delete or replace an existing filesystem object.
+    ///
+    /// AddFile is included because the current implementation writes the target path directly
+    /// and therefore may overwrite an existing file.
+    pub fn is_destructive(&self) -> bool {
+        self.changes.values().any(|change| {
+            matches!(
+                change,
+                ApplyPatchFileChange::Add { .. }
+                    | ApplyPatchFileChange::Delete { .. }
+                    | ApplyPatchFileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
     }
 
     /// Should be used exclusively for testing. (Not worth the overhead of
@@ -235,6 +485,7 @@ impl ApplyPatchAction {
         #[expect(clippy::expect_used)]
         Self {
             changes,
+            destructive_targets: Vec::new(),
             update_file_mode: ApplyPatchFileUpdateMode::default(),
             cwd: path.parent().expect("path should have parent"),
             patch,
@@ -397,6 +648,135 @@ pub async fn apply_patch_with_options(
     apply_hunks_with_options(&hunks, options, cwd, stdout, stderr, fs, sandbox).await
 }
 
+/// Executes a previously verified patch with destructive object-identity preconditions.
+pub async fn apply_patch_with_destructive_targets(
+    patch: &str,
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let hunks = match parse_patch(patch) {
+        Ok(source) => source.hunks,
+        Err(e) => {
+            match &e {
+                InvalidPatchError(message) => {
+                    writeln!(stderr, "Invalid patch: {message}")
+                        .map_err(ApplyPatchError::from)
+                        .map_err(ApplyPatchFailure::without_delta)?;
+                }
+                InvalidHunkError { message, line_number } => {
+                    writeln!(stderr, "Invalid patch hunk on line {line_number}: {message}")
+                        .map_err(ApplyPatchError::from)
+                        .map_err(ApplyPatchFailure::without_delta)?;
+                }
+            }
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::ParseError(e)));
+        }
+    };
+    if hunks.iter().any(hunk_is_destructive) {
+        if destructive_targets.is_empty() {
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+                context: "destructive apply_patch authorization".to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "destructive apply_patch requires verified object-identity preconditions",
+                ),
+            })));
+        }
+
+        // This API is a hard execution boundary too: a caller cannot pass approved
+        // destructive targets and then drop the scoped sandbox before mutation.
+        let scoped_sandbox = match destructive_patch_sandbox(&hunks, cwd, sandbox) {
+            Ok(scoped_sandbox) => scoped_sandbox,
+            Err(error) => return Err(ApplyPatchFailure::without_delta(error)),
+        };
+        let sandbox = scoped_sandbox.as_ref().or(sandbox);
+        if sandbox.is_none() {
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+                context: "destructive apply_patch sandbox".to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "destructive apply_patch requires an enforceable scoped filesystem sandbox",
+                ),
+            })));
+        }
+
+        return apply_hunks_with_options_and_destructive_targets(
+            &hunks,
+            options,
+            cwd,
+            stdout,
+            stderr,
+            fs,
+            sandbox,
+            destructive_targets,
+        )
+        .await;
+    }
+
+    apply_hunks_with_options_and_destructive_targets(
+        &hunks,
+        options,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+        destructive_targets,
+    )
+    .await
+}
+
+async fn apply_hunks_with_options_and_destructive_targets(
+    hunks: &[Hunk],
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let mut delta = AppliedPatchDelta::empty();
+    match apply_hunks_to_files(
+        hunks,
+        options,
+        cwd,
+        fs,
+        sandbox,
+        destructive_targets,
+        &mut delta,
+    )
+    .await
+    {
+        Ok(affected_paths) => {
+            print_summary(&affected_paths, stdout).map_err(|error| {
+                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
+            })?;
+            Ok(delta)
+        }
+        Err(error) => {
+            let msg = error.to_string();
+            writeln!(stderr, "{msg}").map_err(|error| {
+                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
+            })?;
+            let error = if let Some(io) = error.downcast_ref::<std::io::Error>() {
+                ApplyPatchError::from(io)
+            } else {
+                ApplyPatchError::IoError(IoError {
+                    context: msg,
+                    source: std::io::Error::other(error),
+                })
+            };
+            Err(ApplyPatchFailure::new(error, delta))
+        }
+    }
+}
+
 /// Applies hunks and continues to update stdout/stderr
 pub async fn apply_hunks(
     hunks: &[Hunk],
@@ -430,7 +810,7 @@ async fn apply_hunks_with_options(
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
+    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &[], &mut delta).await {
         Ok(affected_paths) => {
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
@@ -473,6 +853,7 @@ async fn apply_hunks_to_files(
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
     delta: &mut AppliedPatchDelta,
 ) -> anyhow::Result<AffectedPaths> {
     let ApplyPatchOptions {
@@ -506,6 +887,32 @@ async fn apply_hunks_to_files(
         let path_uri = hunk.resolve_path(cwd)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
+                let target = destructive_targets
+                    .iter()
+                    .find(|target| target.path() == &path_uri);
+                if let Some(target) = target {
+                    revalidate_destructive_target(target, fs, sandbox).await?;
+                } else {
+                    match fs
+                        .get_metadata(
+                            &path_uri,
+                            GetMetadataOptions {
+                                follow_symlinks: false,
+                            },
+                            sandbox,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            anyhow::bail!(
+                                "apply_patch AddFile would overwrite an existing target without verified destructive authorization: {}",
+                                path_uri.inferred_native_path_string()
+                            );
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 let overwritten_content = read_optional_file_text_for_delta(
                     &path_uri,
                     fs,
@@ -514,6 +921,9 @@ async fn apply_hunks_to_files(
                     &mut delta.exact,
                 )
                 .await;
+                if let Some(target) = target {
+                    revalidate_destructive_target(target, fs, sandbox).await?;
+                }
                 try_write!(
                     write_file_with_missing_parent_retry(
                         fs,
@@ -534,6 +944,8 @@ async fn apply_hunks_to_files(
                 added.push(affected_path);
             }
             Hunk::DeleteFile { .. } => {
+                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 note_existing_path_delta_support(
                     &path_uri,
                     fs,
@@ -549,6 +961,7 @@ async fn apply_hunks_to_files(
                 if deleted_content.is_none() {
                     delta.exact = false;
                 }
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 ensure_not_directory(&path_uri, fs, follow_symlinks, sandbox)
                     .await
                     .with_context(|| {
@@ -604,6 +1017,9 @@ async fn apply_hunks_to_files(
                     &mut delta.exact,
                 )
                 .await;
+                if let Some(source_target) = destructive_source.as_ref() {
+                    revalidate_destructive_target(source_target, fs, sandbox).await?;
+                }
                 let AppliedPatch {
                     original_contents,
                     new_contents,
@@ -618,6 +1034,8 @@ async fn apply_hunks_to_files(
                 .await?;
                 if let Some(dest) = move_path {
                     let dest_uri = cwd.join(&dest.to_string_lossy())?;
+                    let dest_target = destructive_target_for_path(destructive_targets, &dest_uri)?;
+                    revalidate_destructive_target(dest_target, fs, sandbox).await?;
                     let overwritten_move_content = read_optional_file_text_for_delta(
                         &dest_uri,
                         fs,
@@ -626,6 +1044,7 @@ async fn apply_hunks_to_files(
                         &mut delta.exact,
                     )
                     .await;
+                    revalidate_destructive_target(dest_target, fs, sandbox).await?;
                     try_write!(
                         write_file_with_missing_parent_retry(
                             fs,
@@ -637,6 +1056,8 @@ async fn apply_hunks_to_files(
                         .await
                     );
                     let dest_write_change_index = delta.changes.len();
+                    let source_target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                    revalidate_destructive_target(source_target, fs, sandbox).await?;
                     delta.changes.push(AppliedPatchChange {
                         path: dest_uri.clone(),
                         change: AppliedPatchFileChange::Add {
@@ -1441,4 +1862,128 @@ mod tests {
 
         assert!(!delta.is_exact());
     }
+
+    fn workspace_sandbox(cwd: &PathUri) -> FileSystemSandboxContext {
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::workspace_write_with_path_uris(
+                std::slice::from_ref(cwd),
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ),
+            cwd.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn destructive_execution_rejects_missing_sandbox_even_with_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let target = dir.path().join("delete.txt");
+        std::fs::write(&target, "protected").unwrap();
+        let sandbox = workspace_sandbox(&cwd);
+        let patch = "*** Begin Patch\\n*** Delete File: delete.txt\\n*** End Patch";
+
+        let action = match invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await
+        {
+            invocation::MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified destructive patch, got {other:?}"),
+        };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = apply_patch_with_destructive_targets(
+            patch,
+            ApplyPatchOptions {
+                update_file_mode: ApplyPatchFileUpdateMode::default(),
+                follow_symlinks: false,
+            },
+            &cwd,
+            &mut stdout,
+            &mut stderr,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            None,
+            action.destructive_targets(),
+        )
+        .await
+        .expect_err("destructive execution must fail without scoped sandbox");
+
+        assert!(format!("{err}").contains("explicit filesystem sandbox"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "protected");
+    }
+
+    #[tokio::test]
+    async fn destructive_target_appeared_after_authorization_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let target = dir.path().join("new.txt");
+        let patch = "*** Begin Patch\\n*** Add File: new.txt\\n+approved\\n*** End Patch";
+        let sandbox = workspace_sandbox(&cwd);
+
+        let action = match invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await
+        {
+            invocation::MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified destructive patch, got {other:?}"),
+        };
+
+        std::fs::write(&target, "attacker content").unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = apply_patch_with_destructive_targets(
+            patch,
+            ApplyPatchOptions {
+                update_file_mode: ApplyPatchFileUpdateMode::default(),
+                follow_symlinks: false,
+            },
+            &cwd,
+            &mut stdout,
+            &mut stderr,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+            action.destructive_targets(),
+        )
+        .await
+        .expect_err("target appearance must invalidate destructive authorization");
+
+        assert!(format!("{err}").contains("target appeared after authorization"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "attacker content");
+    }
+
+    #[tokio::test]
+    async fn destructive_target_requires_existing_immediate_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let nested = dir.path().join("missing-parent").join("new.txt");
+        let patch = "*** Begin Patch\\n*** Add File: missing-parent/new.txt\\n+approved\\n*** End Patch";
+        let sandbox = workspace_sandbox(&cwd);
+
+        let result = invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await;
+
+        match result {
+            invocation::MaybeApplyPatchVerified::CorrectnessError(error) => {
+                assert!(format!("{error}").contains("existing parent"));
+            }
+            other => panic!("expected fail-closed parent validation, got {other:?}"),
+        }
+        assert!(!nested.exists());
+    }
+
 }

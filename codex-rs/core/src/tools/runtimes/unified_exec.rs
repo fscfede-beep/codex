@@ -216,6 +216,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         Some(&req.sandbox_cwd)
     }
 
+    fn requires_filesystem_safety_fence(&self, _req: &UnifiedExecRequest) -> bool {
+        true
+    }
+
     fn network_approval_spec(
         &self,
         req: &UnifiedExecRequest,
@@ -857,6 +861,22 @@ mod tests {
             runtime.sandbox_cwd(&request),
             Some(&PathUri::from_abs_path(&sandbox_cwd))
         );
+    }
+
+
+    #[tokio::test]
+    async fn unified_exec_requires_filesystem_safety_fence() {
+        let manager = UnifiedExecProcessManager::default();
+        let request = test_request(
+            SandboxPermissions::UseDefault,
+            ExecApprovalRequirement::Skip {
+                bypass_sandbox: true,
+                proposed_execpolicy_amendment: None,
+            },
+        );
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+
+        assert!(runtime.requires_filesystem_safety_fence(&request));
     }
 
     #[tokio::test]

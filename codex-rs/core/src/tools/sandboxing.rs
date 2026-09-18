@@ -279,6 +279,37 @@ pub(crate) fn unsandboxed_execution_allowed(
     !file_system_sandbox_policy.has_denied_read_restrictions()
 }
 
+pub(crate) fn filesystem_safety_fence_permission_profile(
+    permission_profile: &codex_protocol::models::PermissionProfile,
+    workspace_roots: &[PathUri],
+) -> Result<codex_protocol::models::PermissionProfile, String> {
+    match permission_profile {
+        codex_protocol::models::PermissionProfile::External { .. } => Err(
+            "filesystem safety fence requires Codex-managed process scope".to_string(),
+        ),
+        codex_protocol::models::PermissionProfile::Disabled
+        | codex_protocol::models::PermissionProfile::Managed {
+            file_system: codex_protocol::models::ManagedFileSystemPermissions::Unrestricted,
+            ..
+        } => {
+            if workspace_roots.is_empty() {
+                return Err(
+                    "filesystem safety fence requires at least one workspace root".to_string(),
+                );
+            }
+            Ok(
+                codex_protocol::models::PermissionProfile::workspace_write_with_path_uris(
+                    workspace_roots,
+                    permission_profile.network_sandbox_policy(),
+                    /*exclude_tmpdir_env_var*/ true,
+                    /*exclude_slash_tmp*/ true,
+                ),
+            )
+        }
+        codex_protocol::models::PermissionProfile::Managed { .. } => Ok(permission_profile.clone()),
+    }
+}
+
 pub(crate) fn sandbox_permissions_preserving_denied_reads(
     sandbox_permissions: SandboxPermissions,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,

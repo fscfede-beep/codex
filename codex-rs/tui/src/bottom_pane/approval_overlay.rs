@@ -110,6 +110,7 @@ pub(crate) struct ApplyPatchApprovalRequest {
     pub reason: Option<String>,
     pub cwd: AbsolutePathBuf,
     pub changes: HashMap<PathBuf, FileChange>,
+    pub fresh_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -285,9 +286,14 @@ impl ApprovalOverlay {
                 permissions_options(approval_keymap),
                 "Would you like to grant these permissions?".to_string(),
             ),
-            ApprovalRequest::ApplyPatch(_) => (
-                patch_options(approval_keymap),
-                "Would you like to make the following edits?".to_string(),
+            ApprovalRequest::ApplyPatch(request) => (
+                patch_options(approval_keymap, request.fresh_only),
+                if request.fresh_only {
+                    "This change can replace or delete existing files. Would you like to proceed?"
+                        .to_string()
+                } else {
+                    "Would you like to make the following edits?".to_string()
+                },
             ),
             ApprovalRequest::McpElicitation(request) => (
                 elicitation_options(approval_keymap),
@@ -1009,24 +1015,32 @@ fn path_label(base: &str, subpath: &Option<LegacyAppPathString>) -> String {
     }
 }
 
-fn patch_options(keymap: &ApprovalKeymap) -> Vec<ApprovalOption> {
-    vec![
+fn patch_options(keymap: &ApprovalKeymap, fresh_only: bool) -> Vec<ApprovalOption> {
+    let mut options = vec![
         ApprovalOption {
             label: "Yes, proceed".to_string(),
             decision: ApprovalDecision::FileChange(FileChangeApprovalDecision::Accept),
             shortcuts: keymap.approve.clone(),
         },
         ApprovalOption {
-            label: "Yes, and don't ask again for these files".to_string(),
-            decision: ApprovalDecision::FileChange(FileChangeApprovalDecision::AcceptForSession),
-            shortcuts: keymap.approve_for_session.clone(),
-        },
-        ApprovalOption {
             label: "No, and tell Codex what to do differently".to_string(),
             decision: ApprovalDecision::FileChange(FileChangeApprovalDecision::Cancel),
             shortcuts: keymap.decline.clone(),
         },
-    ]
+    ];
+    if !fresh_only {
+        options.insert(
+            1,
+            ApprovalOption {
+                label: "Yes, and don't ask again for these files".to_string(),
+                decision: ApprovalDecision::FileChange(
+                    FileChangeApprovalDecision::AcceptForSession,
+                ),
+                shortcuts: keymap.approve_for_session.clone(),
+            },
+        );
+    }
+    options
 }
 
 fn permissions_options(keymap: &ApprovalKeymap) -> Vec<ApprovalOption> {
@@ -2506,5 +2520,33 @@ mod tests {
             }
         }
         assert_eq!(decision, Some(CommandExecutionApprovalDecision::Accept));
+    }
+    #[test]
+    fn destructive_patch_options_are_fresh_only() {
+        let keymap = RuntimeKeymap::defaults().approval;
+
+        let fresh = patch_options(&keymap, true);
+        assert!(
+            fresh.iter().all(|option| {
+                !matches!(
+                    option.decision,
+                    ApprovalDecision::FileChange(FileChangeApprovalDecision::AcceptForSession)
+                )
+            }),
+            "destructive patch must not expose session persistence"
+        );
+        assert_eq!(fresh.len(), 2);
+
+        let normal = patch_options(&keymap, false);
+        assert!(
+            normal.iter().any(|option| {
+                matches!(
+                    option.decision,
+                    ApprovalDecision::FileChange(FileChangeApprovalDecision::AcceptForSession)
+                )
+            }),
+            "normal patch should retain session approval"
+        );
+        assert_eq!(normal.len(), 3);
     }
 }
