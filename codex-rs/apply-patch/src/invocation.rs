@@ -1039,13 +1039,8 @@ PATCH"#,
 
         let cwd = PathUri::from_host_native_path(session_dir.path()).expect("absolute test path");
         let sandbox = workspace_sandbox(&cwd);
-        let result = maybe_parse_apply_patch_verified(
-            &argv,
-            &cwd,
-            LOCAL_FS.as_ref(),
-            Some(&sandbox),
-        )
-        .await;
+        let result =
+            maybe_parse_apply_patch_verified(&argv, &cwd, LOCAL_FS.as_ref(), Some(&sandbox)).await;
 
         // Verify the patch contents - as otherwise we may have pulled contents
         // from the wrong file (as we're using relative paths)
@@ -1148,13 +1143,9 @@ PATCH"#,
 
         for argv in [add_argv, move_argv] {
             let sandbox = workspace_sandbox(&cwd);
-            let result = maybe_parse_apply_patch_verified(
-                &argv,
-                &cwd,
-                LOCAL_FS.as_ref(),
-                Some(&sandbox),
-            )
-            .await;
+            let result =
+                maybe_parse_apply_patch_verified(&argv, &cwd, LOCAL_FS.as_ref(), Some(&sandbox))
+                    .await;
 
             assert!(matches!(result, MaybeApplyPatchVerified::Body(_)));
         }
