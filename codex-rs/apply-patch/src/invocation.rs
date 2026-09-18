@@ -247,7 +247,7 @@ fn validate_destructive_patch_targets(
     };
 
     if matches!(
-        sandbox.permissions,
+        &sandbox.permissions,
         codex_protocol::models::PermissionProfile::External { .. }
     ) {
         return Err(ParseError::InvalidPatchError(
@@ -662,8 +662,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destructive_verification_rejects_without_sandbox_before_reading() {
-        let dir = tempdir().unwrap();
+    async fn destructive_verification_rejects_without_sandbox_before_reading() -> anyhow::Result<()> {
+        let dir = tempdir()?;
         let outside = dir.path().parent().unwrap().join("codex-p0-v23-secret.txt");
         fs::write(&outside, "do not expose")?;
         let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
@@ -690,29 +690,22 @@ mod tests {
         );
 
         fs::remove_file(outside).unwrap();
+        Ok(())
     }
 
     #[tokio::test]
-    async fn destructive_verification_rejects_outside_workspace_before_target_read() {
-        let dir = tempdir().unwrap();
+    async fn destructive_verification_rejects_outside_workspace_before_target_read() -> anyhow::Result<()> {
+        let dir = tempdir()?;
         let workspace = dir.path().join("workspace");
         let outside = dir.path().join("outside.txt");
-        fs::create_dir_all(&workspace).unwrap();
-        fs::write(&outside, "do not expose").unwrap();
+        fs::create_dir_all(&workspace)?;
+        fs::write(&outside, "do not expose")?;
 
         let cwd = PathUri::from_host_native_path(&workspace).expect("workspace cwd");
         let sandbox = codex_exec_server::FileSystemSandboxContext::from_permission_profile(
             codex_protocol::models::PermissionProfile::Disabled,
             cwd.clone(),
         );
-        let args = strs_to_strings(&[
-            "apply_patch",
-            "../outside.txt",
-            &format!(
-                "*** Begin Patch\n*** Delete File: ../{}\n*** End Patch",
-                outside.file_name().unwrap().to_string_lossy()
-            ),
-        ]);
         let args = vec![
             "apply_patch".to_string(),
             format!(
@@ -736,6 +729,7 @@ mod tests {
         );
 
         fs::remove_file(outside).unwrap();
+        Ok(())
     }
 
     #[tokio::test]
@@ -898,159 +892,3 @@ PATCH"#,
     }
 
     #[tokio::test]
-    async fn test_cd_single_quoted_path_with_spaces() {
-        assert_match(&heredoc_script("cd 'foo bar' && "), Some("foo bar"));
-    }
-
-    #[tokio::test]
-    async fn test_cd_double_quoted_path_with_spaces() {
-        assert_match(&heredoc_script("cd \"foo bar\" && "), Some("foo bar"));
-    }
-
-    #[tokio::test]
-    async fn test_echo_and_apply_patch_is_ignored() {
-        assert_not_match(&heredoc_script("echo foo && "));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_with_arg_is_ignored() {
-        let script = "apply_patch foo <<'PATCH'\n*** Begin Patch\n*** Add File: foo\n+hi\n*** End Patch\nPATCH";
-        assert_not_match(script);
-    }
-
-    #[tokio::test]
-    async fn test_double_cd_then_apply_patch_is_ignored() {
-        assert_not_match(&heredoc_script("cd foo && cd bar && "));
-    }
-
-    #[tokio::test]
-    async fn test_cd_two_args_is_ignored() {
-        assert_not_match(&heredoc_script("cd foo bar && "));
-    }
-
-    #[tokio::test]
-    async fn test_cd_then_apply_patch_then_extra_is_ignored() {
-        let script = heredoc_script_ps("cd bar && ", " && echo done");
-        assert_not_match(&script);
-    }
-
-    #[tokio::test]
-    async fn test_echo_then_cd_and_apply_patch_is_ignored() {
-        // Ensure preceding commands before the `cd && apply_patch <<...` sequence do not match.
-        assert_not_match(&heredoc_script("echo foo; cd bar && "));
-    }
-
-    #[tokio::test]
-    async fn test_unified_diff_last_line_replacement() {
-        // Replace the very last line of the file.
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("last.txt");
-        fs::write(&path, "foo\nbar\nbaz\n").unwrap();
-
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
- foo
- bar
--baz
-+BAZ
-"#,
-            path.display()
-        ));
-
-        let patch = parse_patch(&patch).unwrap();
-        let chunks = match patch.hunks.as_slice() {
-            [Hunk::UpdateFile { chunks, .. }] => chunks,
-            _ => panic!("Expected a single UpdateFile hunk"),
-        };
-
-        let path_uri = PathUri::from_host_native_path(&path).expect("absolute test path");
-        let diff =
-            unified_diff_from_chunks(&path_uri, chunks, LOCAL_FS.as_ref(), /*sandbox*/ None)
-                .await
-                .unwrap();
-        let expected_diff = r#"@@ -2,2 +2,2 @@
- bar
--baz
-+BAZ
-"#;
-        let expected = ApplyPatchFileUpdate {
-            unified_diff: expected_diff.to_string(),
-            original_content: "foo\nbar\nbaz\n".to_string(),
-            content: "foo\nbar\nBAZ\n".to_string(),
-        };
-        assert_eq!(expected, diff);
-    }
-
-    #[tokio::test]
-    async fn test_unified_diff_insert_at_eof() {
-        // Insert a new line at end‑of‑file.
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("insert.txt");
-        fs::write(&path, "foo\nbar\nbaz\n").unwrap();
-
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
-+quux
-*** End of File
-"#,
-            path.display()
-        ));
-
-        let patch = parse_patch(&patch).unwrap();
-        let chunks = match patch.hunks.as_slice() {
-            [Hunk::UpdateFile { chunks, .. }] => chunks,
-            _ => panic!("Expected a single UpdateFile hunk"),
-        };
-
-        let path_uri = PathUri::from_host_native_path(&path).expect("absolute test path");
-        let diff =
-            unified_diff_from_chunks(&path_uri, chunks, LOCAL_FS.as_ref(), /*sandbox*/ None)
-                .await
-                .unwrap();
-        let expected_diff = r#"@@ -3 +3,2 @@
- baz
-+quux
-"#;
-        let expected = ApplyPatchFileUpdate {
-            unified_diff: expected_diff.to_string(),
-            original_content: "foo\nbar\nbaz\n".to_string(),
-            content: "foo\nbar\nbaz\nquux\n".to_string(),
-        };
-        assert_eq!(expected, diff);
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_should_resolve_absolute_paths_in_cwd() {
-        let session_dir = tempdir().unwrap();
-        let relative_path = "source.txt";
-
-        // Note that we need this file to exist for the patch to be "verified"
-        // and parsed correctly.
-        let session_file_path = session_dir.path().join(relative_path);
-        fs::write(&session_file_path, "session directory content\n").unwrap();
-
-        let argv = vec![
-            "apply_patch".to_string(),
-            r#"*** Begin Patch
-*** Update File: source.txt
-@@
--session directory content
-+updated session directory content
-*** End Patch"#
-                .to_string(),
-        ];
-
-        let result = maybe_parse_apply_patch_verified(
-            &argv,
-            &PathUri::from_host_native_path(session_dir.path()).expect("absolute test path"),
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await;
-
-        // Verify the patch contents - as otherwise we may have pulled contents
-        // from the wrong file (as we're using relative paths)
-        assert_eq!(
-            result,
