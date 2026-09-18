@@ -31,6 +31,26 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
     use_legacy_landlock: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
 ) -> Vec<String> {
+    create_linux_sandbox_command_args_for_permission_profile_with_delete_fence(
+        command,
+        command_cwd,
+        permission_profile,
+        sandbox_policy_cwd,
+        use_legacy_landlock,
+        managed_network,
+        true,
+    )
+}
+
+pub(crate) fn create_linux_sandbox_command_args_for_permission_profile_with_delete_fence(
+    command: Vec<String>,
+    command_cwd: &Path,
+    permission_profile: &PermissionProfile,
+    sandbox_policy_cwd: &Path,
+    use_legacy_landlock: bool,
+    managed_network: Option<&ManagedNetworkSandboxContext>,
+    deny_file_deletion: bool,
+) -> Vec<String> {
     let permission_profile_json = serde_json::to_string(permission_profile)
         .unwrap_or_else(|err| panic!("failed to serialize permission profile: {err}"));
     let sandbox_policy_cwd = sandbox_policy_cwd
@@ -60,6 +80,9 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
             serde_json::to_string(managed_network)
                 .unwrap_or_else(|err| panic!("failed to serialize managed network context: {err}")),
         );
+    }
+    if deny_file_deletion {
+        linux_cmd.push("--deny-file-deletion".to_string());
     }
     linux_cmd.push("--".to_string());
     linux_cmd.extend(command);
