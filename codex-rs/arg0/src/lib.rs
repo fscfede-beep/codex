@@ -135,14 +135,14 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     Ok(destructive) => destructive,
                     Err(err) => {
                         eprintln!("Error: invalid apply_patch payload: {err}");
-                        return 1;
+                        1
                     }
                 };
                 if destructive {
                     eprintln!(
                         "Error: destructive apply_patch requires the governed runtime; standalone execution is disabled."
                     );
-                    return 1;
+                    1
                 }
 
                 let cwd = cwd.into();
