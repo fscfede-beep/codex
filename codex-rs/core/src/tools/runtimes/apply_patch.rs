@@ -23,6 +23,8 @@ use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_sandboxing::SandboxType;
@@ -100,10 +102,22 @@ impl ApplyPatchRuntime {
             return None;
         }
 
-        let permissions = effective_permission_profile(
-            attempt.exec_server_permissions,
-            req.additional_permissions.as_ref(),
-        );
+        let permissions = if self.destructive {
+            // A destructive patch must never inherit full-disk/Disabled ambient authority
+            // or additional session/turn filesystem grants. Reconstruct a minimal managed
+            // workspace-write profile from executor-owned roots only.
+            PermissionProfile::workspace_write_with_path_uris(
+                attempt.workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            effective_permission_profile(
+                attempt.exec_server_permissions,
+                req.additional_permissions.as_ref(),
+            )
+        };
         Some(FileSystemSandboxContext {
             permissions,
             cwd: attempt.sandbox_cwd.clone(),
