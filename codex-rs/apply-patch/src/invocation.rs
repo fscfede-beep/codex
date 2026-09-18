@@ -229,6 +229,14 @@ async fn try_verify_apply_patch_args(
         .map(|dir| cwd.join(dir))
         .transpose()?
         .unwrap_or_else(|| cwd.clone());
+
+    // Destructive patches must be scope-checked before any target content is read.
+    // This prevents DeleteFile/Move verification from using a Full Access/Disabled
+    // filesystem context as an oracle for files outside the approved workspace.
+    let destructive_sandbox =
+        crate::destructive_patch_sandbox(&hunks, &effective_cwd, sandbox)?;
+    let sandbox = destructive_sandbox.as_ref().or(sandbox);
+
     let mut changes = HashMap::new();
     for hunk in hunks {
         let path = hunk.resolve_path(&effective_cwd)?;
@@ -507,6 +515,18 @@ mod tests {
         }]
     }
 
+    fn workspace_sandbox(cwd: &PathUri) -> codex_exec_server::FileSystemSandboxContext {
+        codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::workspace_write_with_path_uris(
+                std::slice::from_ref(cwd),
+                codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ),
+            cwd.clone(),
+        )
+    }
+
     #[track_caller]
     fn assert_match_args(args: Vec<String>, expected_workdir: Option<&str>) {
         assert_match_args_with_cwd(
@@ -580,6 +600,105 @@ mod tests {
             .await,
             MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ImplicitInvocation)
         );
+    }
+
+    #[tokio::test]
+    async fn destructive_verification_rejects_without_sandbox_before_reading() {
+        let dir = tempdir().unwrap();
+        let outside = dir.path().parent().unwrap().join("codex-p0-v23-secret.txt");
+        fs::write(&outside, "do not expose").unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let args = strs_to_strings(&[
+            "apply_patch",
+            &format!(
+                "*** Begin Patch\n*** Delete File: ../{}\n*** End Patch",
+                outside.file_name().unwrap().to_string_lossy()
+            ),
+        ]);
+
+        let result =
+            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None)
+                .await;
+        assert_matches!(
+            result,
+            MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ParseError(
+                ParseError::InvalidPatchError(message)
+            )) if message.contains("explicit filesystem sandbox")
+        );
+
+        fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn destructive_verification_uses_workspace_sandbox_for_full_access_context() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside.txt");
+        let link = workspace.join("link.txt");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(&outside, "must remain private").unwrap();
+        symlink(&outside, &link).unwrap();
+
+        let cwd = PathUri::from_host_native_path(&workspace).expect("workspace cwd");
+        let sandbox = codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::Disabled,
+            cwd.clone(),
+        );
+        let args = vec![
+            "apply_patch".to_string(),
+            "*** Begin Patch\n*** Delete File: link.txt\n*** End Patch".to_string(),
+        ];
+
+        let result = maybe_parse_apply_patch_verified(
+            &args,
+            &cwd,
+            LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await;
+
+        assert!(
+            !matches!(result, MaybeApplyPatchVerified::Body(_)),
+            "destructive verification must not follow an in-workspace symlink into a Full Access target: {result:?}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "must remain private");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+
+    #[tokio::test]
+    async fn destructive_verification_rejects_outside_workspace_before_target_read() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside.txt");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(&outside, "do not expose").unwrap();
+
+        let cwd = PathUri::from_host_native_path(&workspace).expect("workspace cwd");
+        let sandbox = codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::Disabled,
+            cwd.clone(),
+        );
+        let args = vec![
+            "apply_patch".to_string(),
+            format!(
+                "*** Begin Patch\n*** Delete File: ../{}\n*** End Patch",
+                outside.file_name().unwrap().to_string_lossy()
+            ),
+        ];
+
+        let result =
+            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), Some(&sandbox)).await;
+        assert_matches!(
+            result,
+            MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ParseError(
+                ParseError::InvalidPatchError(message)
+            )) if message.contains("outside the workspace")
+        );
+
+        fs::remove_file(outside).unwrap();
     }
 
     #[tokio::test]
@@ -886,11 +1005,13 @@ PATCH"#,
                 .to_string(),
         ];
 
+        let cwd = PathUri::from_host_native_path(session_dir.path()).expect("absolute test path");
+        let sandbox = workspace_sandbox(&cwd);
         let result = maybe_parse_apply_patch_verified(
             &argv,
-            &PathUri::from_host_native_path(session_dir.path()).expect("absolute test path"),
+            &cwd,
             LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
+            Some(&sandbox),
         )
         .await;
 
@@ -994,13 +1115,10 @@ PATCH"#,
         ];
 
         for argv in [add_argv, move_argv] {
-            let result = maybe_parse_apply_patch_verified(
-                &argv,
-                &cwd,
-                LOCAL_FS.as_ref(),
-                /*sandbox*/ None,
-            )
-            .await;
+            let sandbox = workspace_sandbox(&cwd);
+            let result =
+                maybe_parse_apply_patch_verified(&argv, &cwd, LOCAL_FS.as_ref(), Some(&sandbox))
+                    .await;
 
             assert!(matches!(result, MaybeApplyPatchVerified::Body(_)));
         }
@@ -1023,11 +1141,13 @@ PATCH"#,
             "*** Begin Patch\n*** Delete File: link.txt\n*** End Patch".to_string(),
         ];
 
+        let cwd = PathUri::from_host_native_path(session_dir.path()).expect("absolute test path");
+        let sandbox = workspace_sandbox(&cwd);
         let result = maybe_parse_apply_patch_verified(
             &argv,
-            &PathUri::from_host_native_path(session_dir.path()).expect("absolute test path"),
+            &cwd,
             LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
+            Some(&sandbox),
         )
         .await;
 

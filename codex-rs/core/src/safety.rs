@@ -87,11 +87,7 @@ pub fn assess_patch_safety(
             /*exclude_tmpdir_env_var*/ true,
             /*exclude_slash_tmp*/ true,
         );
-        if !is_write_patch_constrained_to_writable_paths(
-            action,
-            &workspace_only_policy,
-            context,
-        ) {
+        if !is_write_patch_constrained_to_writable_paths(action, &workspace_only_policy, context) {
             return SafetyCheck::Reject {
                 reason: PATCH_REJECTED_OUTSIDE_PROJECT_REASON.to_string(),
             };

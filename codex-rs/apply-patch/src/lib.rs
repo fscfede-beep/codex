@@ -204,6 +204,76 @@ pub struct ApplyPatchAction {
     pub cwd: PathUri,
 }
 
+/// Filesystem scope used for destructive apply_patch verification and mutation.
+pub(crate) fn destructive_patch_sandbox(
+    hunks: &[Hunk],
+    cwd: &PathUri,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<Option<FileSystemSandboxContext>, ApplyPatchError> {
+    let mut targets = Vec::new();
+
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { .. } | Hunk::DeleteFile { .. } => {
+                targets.push(hunk.resolve_path(cwd)?);
+            }
+            Hunk::UpdateFile {
+                move_path: Some(move_path),
+                ..
+            } => {
+                targets.push(hunk.resolve_path(cwd)?);
+                targets.push(cwd.join(&move_path.to_string_lossy())?);
+            }
+            Hunk::UpdateFile {
+                move_path: None, ..
+            } => {}
+        }
+    }
+
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(sandbox) = sandbox else {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit filesystem sandbox".to_string(),
+        )
+        .into());
+    };
+
+    if sandbox.workspace_roots.is_empty() {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit workspace root".to_string(),
+        )
+        .into());
+    }
+
+    let workspace_policy =
+        codex_protocol::permissions::FileSystemSandboxPolicy::workspace_write_with_path_uris(
+            &sandbox.workspace_roots,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+
+    for target in &targets {
+        if !workspace_policy.can_write_path(target, &sandbox.policy_context()) {
+            return Err(ParseError::InvalidPatchError(format!(
+                "destructive apply_patch target is outside the workspace: {}",
+                target.inferred_native_path_string()
+            ))
+            .into());
+        }
+    }
+
+    let mut scoped = sandbox.clone();
+    scoped.permissions = codex_protocol::models::PermissionProfile::from_runtime_permissions_with_enforcement(
+        codex_protocol::models::SandboxEnforcement::Managed,
+        &workspace_policy,
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+    );
+    Ok(Some(scoped))
+}
+
 impl ApplyPatchAction {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
@@ -447,8 +517,19 @@ async fn apply_hunks_with_options(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let destructive_sandbox = destructive_patch_sandbox(hunks, cwd, sandbox)
+        .map_err(ApplyPatchFailure::without_delta)?;
+    let execution_sandbox = destructive_sandbox.as_ref().or(sandbox);
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
+    match apply_hunks_to_files(
+        hunks,
+        options,
+        cwd,
+        fs,
+        execution_sandbox,
+        &mut delta,
+    )
+    .await {
         Ok(affected_paths) => {
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
