@@ -664,11 +664,7 @@ mod tests {
     #[tokio::test]
     async fn destructive_verification_rejects_without_sandbox_before_reading() {
         let dir = tempdir().unwrap();
-        let outside = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join("codex-p0-v23-secret.txt");
+        let outside = dir.path().parent().unwrap().join("codex-p0-v23-secret.txt");
         fs::write(&outside, "do not expose").unwrap();
         let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
         let args = strs_to_strings(&[
@@ -679,13 +675,8 @@ mod tests {
             ),
         ]);
 
-        let result = maybe_parse_apply_patch_verified(
-            &args,
-            &cwd,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await;
+        let result =
+            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None).await;
         assert_matches!(
             result,
             MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ParseError(
@@ -717,13 +708,8 @@ mod tests {
             ),
         ];
 
-        let result = maybe_parse_apply_patch_verified(
-            &args,
-            &cwd,
-            LOCAL_FS.as_ref(),
-            Some(&sandbox),
-        )
-        .await;
+        let result =
+            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), Some(&sandbox)).await;
         assert_matches!(
             result,
             MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ParseError(
