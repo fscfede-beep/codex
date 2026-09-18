@@ -341,8 +341,20 @@ impl LocalFileSystem {
         options: RemoveOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()> {
-        let (file_system, sandbox) = self.file_system_for_writes(sandbox)?;
-        file_system.remove(path, options, sandbox).await
+        let Some(sandbox) = sandbox else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "filesystem deletion requires an explicit scoped sandbox",
+            ));
+        };
+        sandbox.validate_file_system_paths_for_current_host()?;
+        if !sandbox.should_write_into_sandbox() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "filesystem deletion requires a restricted writable sandbox; unrestricted filesystem authority cannot delete",
+            ));
+        }
+        self.sandboxed()?.remove(path, options, Some(sandbox)).await
     }
 
     async fn copy(
