@@ -220,12 +220,12 @@ async fn get_default_branch(
 ) -> Option<DefaultBranch> {
     let remotes = get_git_remotes(runner, cwd).await.unwrap_or_default();
     for remote in remotes {
+        // Background metadata must stay local; never query a configured remote here.
         if let Some(branch) =
             get_remote_default_branch_from_symbolic_ref(runner, cwd, &remote).await
         {
             return Some(branch);
         }
-
     }
 
     get_default_branch_local(runner, cwd).await
