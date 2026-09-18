@@ -51,7 +51,7 @@ jobs:
 
       - name: Test destructive apply_patch verification preflight
         working-directory: codex-rs
-        run: cargo test -p codex-apply-patch destructive_verification_rejects --lib
+        run: cargo test -p codex-apply-patch destructive_target_ --lib
 
       - name: Test apply-patch package
         working-directory: codex-rs
