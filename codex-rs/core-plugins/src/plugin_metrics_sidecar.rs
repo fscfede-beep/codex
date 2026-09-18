@@ -70,6 +70,7 @@ impl Drop for RemotePluginMetricsDirectory {
         };
         let filesystem = Arc::clone(&self.filesystem);
         let path = self.path.clone();
+        let sandbox = self.sandbox.clone();
         runtime.spawn(async move {
             let _ = filesystem
                 .remove(
@@ -79,7 +80,7 @@ impl Drop for RemotePluginMetricsDirectory {
                         force: true,
                         follow_symlinks: true,
                     },
-                    Some(&self.sandbox),
+                    Some(&sandbox),
                 )
                 .await;
         });
