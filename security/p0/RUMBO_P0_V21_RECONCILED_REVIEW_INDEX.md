@@ -57,3 +57,6 @@ The branch is based directly on the upstream main commit above and does not modi
 6. Universal reversible quarantine/recovery and separate permanent purge authorization.
 
 Status discipline: a static PASS is not treated as native compilation/integration evidence.
+
+
+Revalidation marker: 2026-09-18T07:14:08.157Z — branch integrity rechecked against upstream main 7498521d288b9b3b96ffba4eedf089d8d6e06a84; no production/upstream branch mutation.
