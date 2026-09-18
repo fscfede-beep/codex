@@ -1424,6 +1424,57 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::os::unix::fs::symlink;
 
+    #[tokio::test]
+    async fn local_remove_rejects_missing_sandbox_without_deleting() -> io::Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let target = temp_dir.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let fs = LocalFileSystem::unsandboxed();
+        let path = PathUri::from_host_native_path(&target)?;
+        let result = fs
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                None,
+            )
+            .await;
+        assert_eq!(result.map_err(|err| err.kind()), Err(io::ErrorKind::PermissionDenied));
+        assert_eq!(std::fs::read_to_string(&target)?, "protected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_remove_rejects_disabled_sandbox_authority_without_deleting() -> io::Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let target = temp_dir.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let cwd = PathUri::from_host_native_path(temp_dir.path())?;
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::Disabled,
+            cwd.clone(),
+        );
+        let fs = LocalFileSystem::unsandboxed();
+        let path = PathUri::from_host_native_path(&target)?;
+        let result = fs
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                Some(&sandbox),
+            )
+            .await;
+        assert_eq!(result.map_err(|err| err.kind()), Err(io::ErrorKind::PermissionDenied));
+        assert_eq!(std::fs::read_to_string(&target)?, "protected");
+        Ok(())
+    }
+
     #[test]
     fn resolve_existing_path_handles_symlink_parent_dotdot_escape() -> io::Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
