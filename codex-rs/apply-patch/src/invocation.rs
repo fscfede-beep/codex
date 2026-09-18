@@ -662,10 +662,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destructive_verification_rejects_without_sandbox_before_reading() -> anyhow::Result<()> {
-        let dir = tempdir()?;
-        let outside = dir.path().parent().unwrap().join("codex-p0-v23-secret.txt");
-        fs::write(&outside, "do not expose")?;
+    async fn destructive_verification_rejects_without_sandbox_before_reading() {
+        let dir = tempdir().unwrap();
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("codex-p0-v23-secret.txt");
+        fs::write(&outside, "do not expose").unwrap();
         let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
         let args = strs_to_strings(&[
             "apply_patch",
@@ -690,16 +694,15 @@ mod tests {
         );
 
         fs::remove_file(outside).unwrap();
-        Ok(())
     }
 
     #[tokio::test]
-    async fn destructive_verification_rejects_outside_workspace_before_target_read() -> anyhow::Result<()> {
-        let dir = tempdir()?;
+    async fn destructive_verification_rejects_outside_workspace_before_target_read() {
+        let dir = tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         let outside = dir.path().join("outside.txt");
-        fs::create_dir_all(&workspace)?;
-        fs::write(&outside, "do not expose")?;
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(&outside, "do not expose").unwrap();
 
         let cwd = PathUri::from_host_native_path(&workspace).expect("workspace cwd");
         let sandbox = codex_exec_server::FileSystemSandboxContext::from_permission_profile(
@@ -729,7 +732,6 @@ mod tests {
         );
 
         fs::remove_file(outside).unwrap();
-        Ok(())
     }
 
     #[tokio::test]
@@ -797,7 +799,8 @@ mod tests {
     async fn test_heredoc_non_login_shell() {
         let script = heredoc_script("");
         let args = strs_to_strings(&["bash", "-c", &script]);
-        assert_match_args(args, /*expected_workdir*/ None);    }
+        assert_match_args(args, /*expected_workdir*/ None);
+    }
 
     #[tokio::test]
     async fn test_heredoc_applypatch() {
