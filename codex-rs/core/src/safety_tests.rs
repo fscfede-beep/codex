@@ -453,7 +453,6 @@ fn missing_project_dot_codex_config_requires_approval() {
     );
 }
 
-
 #[test]
 fn destructive_patch_is_never_auto_approved() {
     let tmp = TempDir::new().unwrap();
