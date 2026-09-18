@@ -181,6 +181,18 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 }
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
+    fn requires_filesystem_safety_fence(&self, _req: &ApplyPatchRequest) -> bool {
+        self.destructive
+    }
+
+    fn allow_destructive_filesystem_effects(
+        &self,
+        _req: &ApplyPatchRequest,
+        already_approved: bool,
+    ) -> bool {
+        self.destructive && already_approved
+    }
+
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
         &req.turn_environment
     }
