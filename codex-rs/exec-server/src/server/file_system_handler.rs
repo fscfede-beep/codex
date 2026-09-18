@@ -15,6 +15,10 @@ use crate::ReadFileOptions;
 use crate::RemoveOptions;
 use crate::WriteFileOptions;
 use crate::file_read::FileReadHandleManager;
+use codex_file_system::FileSystemSandboxContext;
+use codex_protocol::models::ManagedFileSystemPermissions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemAccessMode;
 use crate::local_file_system::LocalFileSystem;
 use crate::protocol::FS_READ_DIRECTORY_METHOD;
 use crate::protocol::FS_WRITE_FILE_METHOD;
@@ -299,6 +303,7 @@ impl FileSystemHandler {
         &self,
         params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
+        let sandbox = require_scoped_delete_sandbox(params.sandbox.as_ref())?;
         let recursive = params.recursive.unwrap_or(true);
         let force = params.force.unwrap_or(true);
         self.file_system
@@ -307,9 +312,10 @@ impl FileSystemHandler {
                 RemoveOptions {
                     recursive,
                     force,
-                    follow_symlinks: params.follow_symlinks.unwrap_or(true),
+                    // Deletion never follows symbolic links at the filesystem API boundary.
+                    follow_symlinks: false,
                 },
-                params.sandbox.as_ref(),
+                Some(sandbox),
             )
             .await
             .map_err(map_fs_error)?;
@@ -333,6 +339,33 @@ impl FileSystemHandler {
             .map_err(map_fs_error)?;
         Ok(FsCopyResponse {})
     }
+}
+
+fn require_scoped_delete_sandbox(
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<&FileSystemSandboxContext, JSONRPCErrorError> {
+    let sandbox = sandbox.ok_or_else(|| {
+        invalid_request(
+            "fs/remove requires an explicit restricted filesystem sandbox",
+        )
+    })?;
+    sandbox
+        .validate_file_system_paths_for_current_host()
+        .map_err(|err| invalid_request(format!("invalid filesystem sandbox context: {err}")))?;
+
+    let has_write_root = matches!(
+        &sandbox.permissions,
+        PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted { entries, .. },
+            ..
+        } if entries.iter().any(|entry| entry.access == FileSystemAccessMode::Write)
+    );
+    if !has_write_root {
+        return Err(invalid_request(
+            "fs/remove requires a restricted writable filesystem root; unrestricted or read-only authority cannot mint delete access",
+        ));
+    }
+    Ok(sandbox)
 }
 
 fn validate_file_read_handle_id(handle_id: &str) -> Result<(), JSONRPCErrorError> {
