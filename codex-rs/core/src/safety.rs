@@ -63,6 +63,24 @@ pub fn assess_patch_safety(
         }
     };
 
+    if action.is_destructive() {
+        let sandbox_approval_allowed = !rejects_sandbox_approval;
+        if !sandbox_approval_allowed {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an approval-capable sandbox".to_string(),
+            };
+        }
+        if !sandbox_available
+            && !matches!(permission_profile, PermissionProfile::Disabled | PermissionProfile::External { .. })
+        {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an enforceable filesystem sandbox"
+                    .to_string(),
+            };
+        }
+        return SafetyCheck::AskUser;
+    }
+
     // Even though the patch appears to be constrained to writable paths, it is
     // possible that paths in the patch are hard links to files outside the
     // writable roots, so we should still run `apply_patch` in a sandbox in that case.
