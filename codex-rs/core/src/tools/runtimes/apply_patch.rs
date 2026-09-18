@@ -16,6 +16,7 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::executor_windows_sandbox_selection;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::DestructivePatchTarget;
 use codex_apply_patch::ApplyPatchOptions;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_protocol::error::CodexErr;
@@ -204,25 +205,35 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_options(
-            &req.action.patch,
-            ApplyPatchOptions {
-                update_file_mode: req.action.update_file_mode(),
-                // Only reject links when an otherwise-required sandbox was bypassed.
-                // Executor-managed sandboxes can have SandboxType::None.
-                // Destructive apply_patch was verified without following symlinks.
-                // Keep the execution phase identical: path components and the final entry
-                // must be opened/unlinked with no-follow semantics to avoid a link/reparse
-                // substitution between preflight and mutation.
-                follow_symlinks: !self.destructive,
-            },
-            &req.action.cwd,
-            &mut stdout,
-            &mut stderr,
-            fs.as_ref(),
-            sandbox.as_ref(),
-        )
-        .await;
+        let options = ApplyPatchOptions {
+            update_file_mode: req.action.update_file_mode(),
+            // Destructive apply_patch uses no-follow execution semantics.
+            follow_symlinks: !self.destructive,
+        };
+        let result = if self.destructive {
+            codex_apply_patch::apply_patch_with_destructive_targets(
+                &req.action.patch,
+                options,
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+                &req.destructive_targets,
+            )
+            .await
+        } else {
+            codex_apply_patch::apply_patch_with_options(
+                &req.action.patch,
+                options,
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+            )
+            .await
+        };
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let failed = result.is_err();
