@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::GetMetadataOptions;
+use std::io;
 use tree_sitter::Parser;
 use tree_sitter::Query;
 use tree_sitter::QueryCursor;
@@ -390,41 +391,73 @@ async fn capture_destructive_target(
             Ok(DestructivePatchTarget::existing(path.clone(), identity))
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or_else(|| ApplyPatchError::IoError(IoError {
-                context: format!("Cannot establish parent for {}", path.inferred_native_path_string()),
-                source: std::io::Error::new(io::ErrorKind::InvalidInput, "destructive target has no parent"),
-            }))?;
-            let parent_metadata = fs
-                .get_metadata(&parent, GetMetadataOptions { follow_symlinks: false }, sandbox)
-                .await
-                .map_err(|source| ApplyPatchError::IoError(IoError {
-                    context: format!("Failed to inspect parent {}", parent.inferred_native_path_string()),
-                    source,
-                }))?;
-            if parent_metadata.is_symlink || !parent_metadata.is_directory {
-                return Err(ApplyPatchError::IoError(IoError {
-                    context: format!("Unsafe parent {}", parent.inferred_native_path_string()),
-                    source: std::io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "destructive apply_patch requires an existing regular parent directory",
-                    ),
-                }));
+            let mut parent = path.parent();
+            while let Some(candidate) = parent.clone() {
+                match fs
+                    .get_metadata(
+                        &candidate,
+                        GetMetadataOptions { follow_symlinks: false },
+                        sandbox,
+                    )
+                    .await
+                {
+                    Ok(parent_metadata) => {
+                        if parent_metadata.is_symlink || !parent_metadata.is_directory {
+                            return Err(ApplyPatchError::IoError(IoError {
+                                context: format!(
+                                    "Unsafe parent {}",
+                                    candidate.inferred_native_path_string()
+                                ),
+                                source: std::io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "destructive apply_patch requires a non-symlink directory ancestor",
+                                ),
+                            }));
+                        }
+                        let identity = fs
+                            .get_object_identity(&candidate, sandbox)
+                            .await
+                            .map_err(|source| ApplyPatchError::IoError(IoError {
+                                context: format!(
+                                    "Failed to identify parent {}",
+                                    candidate.inferred_native_path_string()
+                                ),
+                                source,
+                            }))?
+                            .ok_or_else(|| ApplyPatchError::IoError(IoError {
+                                context: format!(
+                                    "Cannot prove parent identity for {}",
+                                    candidate.inferred_native_path_string()
+                                ),
+                                source: std::io::Error::new(
+                                    io::ErrorKind::PermissionDenied,
+                                    "destructive apply_patch requires executor-provided parent identity",
+                                ),
+                            }))?;
+                        return Ok(DestructivePatchTarget::missing_parent(
+                            path.clone(),
+                            candidate,
+                            identity,
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        parent = candidate.parent();
+                    }
+                    Err(error) => {
+                        return Err(ApplyPatchError::IoError(IoError {
+                            context: format!(
+                                "Failed to inspect parent {}",
+                                candidate.inferred_native_path_string()
+                            ),
+                            source: error,
+                        }));
+                    }
+                }
             }
-            let identity = fs
-                .get_object_identity(&parent, sandbox)
-                .await
-                .map_err(|source| ApplyPatchError::IoError(IoError {
-                    context: format!("Failed to identify parent {}", parent.inferred_native_path_string()),
-                    source,
-                }))?
-                .ok_or_else(|| ApplyPatchError::IoError(IoError {
-                    context: format!("Cannot prove parent identity for {}", parent.inferred_native_path_string()),
-                    source: std::io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "destructive apply_patch requires executor-provided parent identity",
-                    ),
-                }))?;
-            Ok(DestructivePatchTarget::missing_parent(path.clone(), identity))
+            Err(ApplyPatchError::IoError(IoError {
+                context: format!("Cannot establish parent for {}", path.inferred_native_path_string()),
+                source,
+            }))
         }
         Err(source) => Err(ApplyPatchError::IoError(IoError {
             context: format!("Failed to inspect destructive target {}", path.inferred_native_path_string()),
