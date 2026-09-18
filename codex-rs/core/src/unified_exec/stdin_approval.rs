@@ -196,7 +196,6 @@ impl ProcessEntry {
         }
 
         let environment = context
-        let environment = context
             .step_context
             .environments
             .turn_environments()
@@ -247,7 +246,9 @@ impl ProcessEntry {
         let sandbox_permissions = permissions
             .review_requirement(&current, environment.permission_profile())
             .map_err(approval_error)?;
-        if sandbox_permissions == SandboxPermissions::UseDefault && !strict_auto_review && !destructive_input {
+        if sandbox_permissions == SandboxPermissions::UseDefault
+            && !strict_auto_review
+            && !destructive_input
             return Ok(None);
         }
         // Manual approvals shell-quote the input, which cannot preserve NUL bytes.
