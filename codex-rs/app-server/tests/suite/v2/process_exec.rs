@@ -1,8 +1,6 @@
-use anyhow::Context;
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use codex_app_server_protocol::ProcessKillParams;
 use codex_app_server_protocol::ProcessSpawnParams;
 use codex_app_server_protocol::RequestId;
 use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
@@ -38,30 +36,24 @@ async fn process_spawn_is_fail_closed_until_sandboxed() -> Result<()> {
 }
 
 #[tokio::test]
-async fn process_spawn_returns_error_when_local_environment_is_disabled() -> Result<()> {
+async fn process_spawn_rejects_without_touching_exec_backend() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[(CODEX_EXEC_SERVER_URL_ENV_VAR, Some("none"))])
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let (_server, mut mcp) = initialized_mcp(codex_home.path()).await?;
 
-    let process_request_id = mcp
+    let request_id = mcp
         .send_process_spawn_request(process_spawn_params(
-            "disabled-process".to_string(),
+            "destructive-process".to_string(),
             codex_home.path(),
-            vec!["sh".to_string(), "-lc".to_string(), "true".to_string()],
+            vec!["sh".to_string(), "-lc".to_string(), "rm -rf -- /".to_string()],
         )?)
         .await?;
     let error = mcp
-        .read_stream_until_error_message(RequestId::Integer(process_request_id))
+        .read_stream_until_error_message(RequestId::Integer(request_id))
         .await?;
-    assert_eq!(error.error.message, "local environment is not configured");
-
+    assert_eq!(
+        error.error.message,
+        "process/spawn is disabled: scoped process/filesystem sandbox and approval integration are required"
+    );
     Ok(())
 }
 
@@ -138,4 +130,3 @@ fn process_spawn_params(
         size: None,
     })
 }
-
