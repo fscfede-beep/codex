@@ -155,14 +155,14 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     1
                 } else {
                     match runtime.block_on(codex_apply_patch::apply_patch_with_options(
-                    &patch_arg,
-                    codex_apply_patch::ApplyPatchOptions {
-                        update_file_mode,
-                        ..Default::default()
-                    },
-                    &cwd,
-                    &mut stdout,
-                    &mut stderr,
+                        &patch_arg,
+                        codex_apply_patch::ApplyPatchOptions {
+                            update_file_mode,
+                            ..Default::default()
+                        },
+                        &cwd,
+                        &mut stdout,
+                        &mut stderr,
                         codex_exec_server::LOCAL_FS.as_ref(),
                         /*sandbox*/ None,
                     )) {
