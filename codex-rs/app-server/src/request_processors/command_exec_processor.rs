@@ -377,5 +377,3 @@ fn govern_command_exec_profile(
         PermissionProfile::Managed { .. } => Ok(profile),
     }
 }
-
-}
