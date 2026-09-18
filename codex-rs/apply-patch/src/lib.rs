@@ -20,6 +20,10 @@ use codex_exec_server::FileSystemObjectIdentity;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
 pub use parser::Hunk;
@@ -231,6 +235,175 @@ impl DestructivePatchTarget {
     pub(crate) fn state(&self) -> &DestructivePatchTargetState {
         &self.state
     }
+}
+
+/// Reconstructs a managed workspace-only sandbox for destructive patch verification/mutation.
+/// This is deliberately independent of ambient Full Access/Disabled authority and additional
+/// filesystem grants. Destructive verification must cross this gate before reading target data.
+pub(crate) fn destructive_patch_sandbox(
+    hunks: &[Hunk],
+    cwd: &PathUri,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<Option<FileSystemSandboxContext>, ApplyPatchError> {
+    let mut targets = Vec::new();
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { .. } | Hunk::DeleteFile { .. } => {
+                targets.push(hunk.resolve_path(cwd)?);
+            }
+            Hunk::UpdateFile {
+                move_path: Some(move_path),
+                ..
+            } => {
+                targets.push(hunk.resolve_path(cwd)?);
+                targets.push(cwd.join(&move_path.to_string_lossy())?);
+            }
+            Hunk::UpdateFile { move_path: None, .. } => {}
+        }
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let Some(sandbox) = sandbox else {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit filesystem sandbox".to_string(),
+        )
+        .into());
+    };
+    if matches!(sandbox.permissions, PermissionProfile::External { .. }) {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires Codex-managed filesystem scope".to_string(),
+        )
+        .into());
+    }
+    if sandbox.workspace_roots.is_empty() {
+        return Err(ParseError::InvalidPatchError(
+            "destructive apply_patch requires an explicit workspace root".to_string(),
+        )
+        .into());
+    }
+    let workspace_policy = FileSystemSandboxPolicy::workspace_write_with_path_uris(
+        &sandbox.workspace_roots,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let policy_context = sandbox.policy_context();
+    for target in &targets {
+        if !workspace_policy.can_write_path(target, &policy_context) {
+            return Err(ParseError::InvalidPatchError(format!(
+                "destructive apply_patch target is outside the workspace: {}",
+                target.inferred_native_path_string()
+            ))
+            .into());
+        }
+    }
+    let mut scoped = sandbox.clone();
+    scoped.permissions = PermissionProfile::from_runtime_permissions_with_enforcement(
+        SandboxEnforcement::Managed,
+        &workspace_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    scoped.workspace_roots = sandbox.workspace_roots.clone();
+    Ok(Some(scoped))
+}
+
+fn destructive_target_for_path<'a>(
+    targets: &'a [DestructivePatchTarget],
+    path: &PathUri,
+) -> anyhow::Result<&'a DestructivePatchTarget> {
+    targets.iter().find(|target| target.path() == path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "destructive apply_patch target was not present in the verified target set: {}",
+            path.inferred_native_path_string()
+        )
+    })
+}
+
+async fn revalidate_destructive_target(
+    target: &DestructivePatchTarget,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> anyhow::Result<()> {
+    match target.state() {
+        DestructivePatchTargetState::Existing(expected_identity) => {
+            let metadata = fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await?;
+            if metadata.is_symlink || !metadata.is_file || metadata.is_directory {
+                anyhow::bail!(
+                    "destructive apply_patch target changed type: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+            let actual_identity = fs
+                .get_object_identity(target.path(), sandbox)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "destructive apply_patch target identity is unavailable: {}",
+                    target.path().inferred_native_path_string()
+                ))?;
+            if &actual_identity != expected_identity {
+                anyhow::bail!(
+                    "destructive apply_patch target identity changed: {}",
+                    target.path().inferred_native_path_string()
+                );
+            }
+        }
+        DestructivePatchTargetState::MissingParent { parent, identity } => {
+            match fs
+                .get_metadata(
+                    target.path(),
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await
+            {
+                Ok(_) => anyhow::bail!(
+                    "destructive apply_patch target appeared after authorization: {}",
+                    target.path().inferred_native_path_string()
+                ),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let parent_metadata = fs
+                .get_metadata(
+                    parent,
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    sandbox,
+                )
+                .await?;
+            if parent_metadata.is_symlink || !parent_metadata.is_directory {
+                anyhow::bail!(
+                    "destructive apply_patch parent changed type: {}",
+                    parent.inferred_native_path_string()
+                );
+            }
+            let actual_identity = fs
+                .get_object_identity(parent, sandbox)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "destructive apply_patch parent identity is unavailable: {}",
+                    parent.inferred_native_path_string()
+                ))?;
+            if &actual_identity != identity {
+                anyhow::bail!(
+                    "destructive apply_patch parent identity changed: {}",
+                    parent.inferred_native_path_string()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// ApplyPatchAction is the result of parsing an `apply_patch` command. By
@@ -1198,424 +1371,3 @@ mod tests {
             path.display()
         );
         assert_eq!(stdout_str, expected_out);
-        assert_eq!(stderr_str, "");
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_update_file_hunk_modifies_content() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("update.txt");
-        fs::write(&path, "foo\nbar\n").unwrap();
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
- foo
--bar
-+baz"#,
-            path.display()
-        ));
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-        // Validate modified file contents and expected stdout/stderr.
-        let stdout_str = String::from_utf8(stdout).unwrap();
-        let stderr_str = String::from_utf8(stderr).unwrap();
-        let expected_out = format!(
-            "Success. Updated the following files:\nM {}\n",
-            path.display()
-        );
-        assert_eq!(stdout_str, expected_out);
-        assert_eq!(stderr_str, "");
-        let contents = fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, "foo\nbaz\n");
-    }
-
-    #[tokio::test]
-    async fn test_update_file_hunk_can_move_file() {
-        let dir = tempdir().unwrap();
-        let src = dir.path().join("src.txt");
-        let dest = dir.path().join("dst.txt");
-        fs::write(&src, "line\n").unwrap();
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-*** Move to: {}
-@@
--line
-+line2"#,
-            src.display(),
-            dest.display()
-        ));
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-        // Validate move semantics and expected stdout/stderr.
-        let stdout_str = String::from_utf8(stdout).unwrap();
-        let stderr_str = String::from_utf8(stderr).unwrap();
-        let expected_out = format!(
-            "Success. Updated the following files:\nM {}\n",
-            dest.display()
-        );
-        assert_eq!(stdout_str, expected_out);
-        assert_eq!(stderr_str, "");
-        assert!(!src.exists());
-        let contents = fs::read_to_string(&dest).unwrap();
-        assert_eq!(contents, "line2\n");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_failed_move_returns_committed_destination_delta() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir().unwrap();
-        let source_dir = dir.path().join("locked");
-        let dest_dir = dir.path().join("out");
-        fs::create_dir(&source_dir).unwrap();
-        fs::create_dir(&dest_dir).unwrap();
-        let src = source_dir.join("src.txt");
-        let dest = dest_dir.join("dst.txt");
-        fs::write(&src, "line\n").unwrap();
-        fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o555)).unwrap();
-
-        let patch = wrap_patch(
-            "*** Update File: locked/src.txt\n*** Move to: out/dst.txt\n@@\n-line\n+line2",
-        );
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let failure = apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .expect_err("source removal should fail after destination write");
-
-        fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755)).unwrap();
-
-        assert!(
-            String::from_utf8(stderr)
-                .unwrap()
-                .contains(&format!("Failed to remove original {}", src.display()))
-        );
-        assert_eq!(
-            failure.delta(),
-            &AppliedPatchDelta::new(
-                vec![AppliedPatchChange {
-                    path: PathUri::from_host_native_path(&dest).expect("absolute destination path"),
-                    change: AppliedPatchFileChange::Add {
-                        content: "line2\n".to_string(),
-                        overwritten_content: None,
-                    },
-                }],
-                /*exact*/ true,
-            )
-        );
-        assert_eq!(fs::read_to_string(src).unwrap(), "line\n");
-        assert_eq!(fs::read_to_string(dest).unwrap(), "line2\n");
-    }
-
-    /// Verify that a single `Update File` hunk with multiple change chunks can update different
-    /// parts of a file and that the file is listed only once in the summary.
-    #[tokio::test]
-    async fn test_multiple_update_chunks_apply_to_single_file() {
-        // Start with a file containing four lines.
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("multi.txt");
-        fs::write(&path, "foo\nbar\nbaz\nqux\n").unwrap();
-        // Construct an update patch with two separate change chunks.
-        // The first chunk uses the line `foo` as context and transforms `bar` into `BAR`.
-        // The second chunk uses `baz` as context and transforms `qux` into `QUX`.
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
- foo
--bar
-+BAR
-@@
- baz
--qux
-+QUX"#,
-            path.display()
-        ));
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-        let stdout_str = String::from_utf8(stdout).unwrap();
-        let stderr_str = String::from_utf8(stderr).unwrap();
-        let expected_out = format!(
-            "Success. Updated the following files:\nM {}\n",
-            path.display()
-        );
-        assert_eq!(stdout_str, expected_out);
-        assert_eq!(stderr_str, "");
-        let contents = fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, "foo\nBAR\nbaz\nQUX\n");
-    }
-
-    /// A more involved `Update File` hunk that exercises additions, deletions and
-    /// replacements in separate chunks that appear in non‑adjacent parts of the
-    /// file.  Verifies that all edits are applied and that the summary lists the
-    /// file only once.
-    #[tokio::test]
-    async fn test_update_file_hunk_interleaved_changes() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("interleaved.txt");
-
-        // Original file: six numbered lines.
-        fs::write(&path, "a\nb\nc\nd\ne\nf\n").unwrap();
-
-        // Patch performs:
-        //  • Replace `b` → `B`
-        //  • Replace `e` → `E` (using surrounding context)
-        //  • Append new line `g` at the end‑of‑file
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
- a
--b
-+B
-@@
- c
- d
--e
-+E
-@@
- f
-+g
-*** End of File"#,
-            path.display()
-        ));
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-
-        let stdout_str = String::from_utf8(stdout).unwrap();
-        let stderr_str = String::from_utf8(stderr).unwrap();
-
-        let expected_out = format!(
-            "Success. Updated the following files:\nM {}\n",
-            path.display()
-        );
-        assert_eq!(stdout_str, expected_out);
-        assert_eq!(stderr_str, "");
-
-        let contents = fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, "a\nB\nc\nd\nE\nf\ng\n");
-    }
-
-    #[tokio::test]
-    async fn test_pure_addition_chunk_followed_by_removal() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("panic.txt");
-        fs::write(&path, "line1\nline2\nline3\n").unwrap();
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
-+after-context
-+second-line
-@@
- line1
--line2
--line3
-+line2-replacement"#,
-            path.display()
-        ));
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-        let contents = fs::read_to_string(path).unwrap();
-        assert_eq!(
-            contents,
-            "line1\nline2-replacement\nafter-context\nsecond-line\n"
-        );
-    }
-
-    /// Ensure that patches authored with ASCII characters can update lines that
-    /// contain typographic Unicode punctuation (e.g. EN DASH, NON-BREAKING
-    /// HYPHEN). Historically `git apply` succeeds in such scenarios but our
-    /// internal matcher failed requiring an exact byte-for-byte match.  The
-    /// fuzzy-matching pass that normalises common punctuation should now bridge
-    /// the gap.
-    #[tokio::test]
-    async fn test_update_line_with_unicode_dash() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("unicode.py");
-
-        // Original line contains EN DASH (\u{2013}) and NON-BREAKING HYPHEN (\u{2011}).
-        let original = "import asyncio  # local import \u{2013} avoids top\u{2011}level dep\n";
-        std::fs::write(&path, original).unwrap();
-
-        // Patch uses plain ASCII dash / hyphen.
-        let patch = wrap_patch(&format!(
-            r#"*** Update File: {}
-@@
--import asyncio  # local import - avoids top-level dep
-+import asyncio  # HELLO"#,
-            path.display()
-        ));
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-
-        // File should now contain the replaced comment.
-        let expected = "import asyncio  # HELLO\n";
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, expected);
-
-        // Ensure success summary lists the file as modified.
-        let stdout_str = String::from_utf8(stdout).unwrap();
-        let expected_out = format!(
-            "Success. Updated the following files:\nM {}\n",
-            path.display()
-        );
-        assert_eq!(stdout_str, expected_out);
-
-        // No stderr expected.
-        assert_eq!(String::from_utf8(stderr).unwrap(), "");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_apply_patch_fails_on_write_error() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir().unwrap();
-        let locked_dir = dir.path().join("locked");
-        fs::create_dir(&locked_dir).unwrap();
-        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o555)).unwrap();
-
-        let patch = wrap_patch("*** Add File: locked/new.txt\n+after");
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let result = apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await;
-        let failure = result.expect_err("write should fail");
-
-        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
-
-        assert!(!failure.delta().is_exact());
-    }
-
-    #[tokio::test]
-    async fn test_unreadable_destinations_return_inexact_delta() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("binary.dat");
-        fs::write(dir.path().join("source.txt"), "before\n").unwrap();
-        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute test path");
-
-        for patch in [
-            wrap_patch("*** Add File: binary.dat\n+text"),
-            wrap_patch("*** Update File: source.txt\n*** Move to: binary.dat\n@@\n-before\n+after"),
-        ] {
-            fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let delta = apply_patch(
-                &patch,
-                &cwd,
-                &mut stdout,
-                &mut stderr,
-                LOCAL_FS.as_ref(),
-                /*sandbox*/ None,
-            )
-            .await
-            .unwrap();
-
-            assert!(!delta.is_exact());
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_delete_symlink_returns_inexact_delta() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("target.txt"), "target\n").unwrap();
-        symlink(dir.path().join("target.txt"), dir.path().join("link.txt")).unwrap();
-        let patch = wrap_patch("*** Delete File: link.txt");
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let delta = apply_patch(
-            &patch,
-            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
-            &mut stdout,
-            &mut stderr,
-            LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
-        )
-        .await
-        .unwrap();
-
-        assert!(!delta.is_exact());
-    }
-}
