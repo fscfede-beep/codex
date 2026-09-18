@@ -25,11 +25,15 @@ use codex_core::exec::IO_DRAIN_TIMEOUT_MS;
 use codex_core::sandboxing::execute_env;
 use codex_core::sandboxing::ExecRequest;
 use codex_protocol::exec_output::bytes_to_string_smart;
+use codex_sandboxing::SandboxType;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
+use codex_utils_pty::ProcessHandle;
+use codex_utils_pty::SpawnedProcess;
 use codex_utils_pty::TerminalSize;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
@@ -94,6 +98,17 @@ pub(crate) struct StartCommandExecParams {
     pub(crate) size: Option<TerminalSize>,
 }
 
+struct RunCommandParams {
+    outgoing: Arc<OutgoingMessageSender>,
+    request_id: ConnectionRequestId,
+    process_id: Option<String>,
+    spawned: SpawnedProcess,
+    control_rx: mpsc::Receiver<CommandControlRequest>,
+    stream_stdin: bool,
+    stream_stdout_stderr: bool,
+    expiration: ExecExpiration,
+    output_bytes_cap: Option<usize>,
+}
 
 struct SpawnProcessOutputParams {
     connection_id: ConnectionId,
@@ -143,25 +158,20 @@ impl CommandExecManager {
             size,
         } = params;
 
-        // The interactive PTY/streaming implementation below uses raw process spawning and
-        // cannot currently preserve the ExecRequest's sandbox/capability boundary. Fail closed
-        // until a sandbox-aware interactive transport exists.
+        // Streaming PTY execution currently relies on raw process spawning and cannot
+        // preserve the ExecRequest sandbox/capability boundary. Fail closed until a
+        // sandbox-aware interactive transport exists.
         if tty || stream_stdin || stream_stdout_stderr {
             return Err(invalid_request(
                 "streaming command/exec is disabled until a sandbox-aware interactive process transport is available",
             ));
         }
-        if process_id.is_none() && (tty || stream_stdin || stream_stdout_stderr) {
+
+        if exec_request.sandbox == SandboxType::None {
             return Err(invalid_request(
-                "command/exec tty or streaming requires a client-supplied processId",
+                "command/exec requires an enforceable filesystem/process sandbox",
             ));
         }
-        let _process_id = process_id;
-        let process_key = ConnectionProcessId {
-            connection_id: request_id.connection_id,
-            process_id: process_id.clone(),
-        };
-
 
         let response_request_id = request_id.clone();
         tokio::spawn(async move {
@@ -189,10 +199,9 @@ impl CommandExecManager {
                 }
             }
         });
-        let _ = (output_bytes_cap, size, process_id);
+        let _ = (process_id, output_bytes_cap, size);
         Ok(())
     }
-
     pub(crate) async fn write(
         &self,
         request_id: ConnectionRequestId,
@@ -303,3 +312,655 @@ impl CommandExecManager {
                 .ok_or_else(|| {
                     invalid_request(format!(
                         "no active command/exec for process id {}",
+                        process_id.process_id.error_repr(),
+                    ))
+                })?
+        };
+        let CommandExecSession::Active { control_tx } = session else {
+            return Err(invalid_request(
+                "command/exec/write, command/exec/terminate, and command/exec/resize are not supported for windows sandbox processes",
+            ));
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = CommandControlRequest {
+            control,
+            response_tx: Some(response_tx),
+        };
+        control_tx
+            .send(request)
+            .await
+            .map_err(|_| command_no_longer_running_error(&process_id.process_id))?;
+        response_rx
+            .await
+            .map_err(|_| command_no_longer_running_error(&process_id.process_id))?
+    }
+}
+
+async fn run_command(params: RunCommandParams) {
+    let RunCommandParams {
+        outgoing,
+        request_id,
+        process_id,
+        spawned,
+        control_rx,
+        stream_stdin,
+        stream_stdout_stderr,
+        expiration,
+        output_bytes_cap,
+    } = params;
+    let mut control_rx = control_rx;
+    let mut control_open = true;
+    let expiration = expiration.wait_with_outcome();
+    tokio::pin!(expiration);
+    let SpawnedProcess {
+        session,
+        stdout_rx,
+        stderr_rx,
+        exit_rx,
+    } = spawned;
+    tokio::pin!(exit_rx);
+    let mut expiration_outcome = None;
+    let (stdio_timeout_tx, stdio_timeout_rx) = watch::channel(false);
+
+    let stdout_handle = spawn_process_output(SpawnProcessOutputParams {
+        connection_id: request_id.connection_id,
+        process_id: process_id.clone(),
+        output_rx: stdout_rx,
+        stdio_timeout_rx: stdio_timeout_rx.clone(),
+        outgoing: Arc::clone(&outgoing),
+        stream: CommandExecOutputStream::Stdout,
+        stream_output: stream_stdout_stderr,
+        output_bytes_cap,
+    });
+    let stderr_handle = spawn_process_output(SpawnProcessOutputParams {
+        connection_id: request_id.connection_id,
+        process_id: process_id.clone(),
+        output_rx: stderr_rx,
+        stdio_timeout_rx,
+        outgoing: Arc::clone(&outgoing),
+        stream: CommandExecOutputStream::Stderr,
+        stream_output: stream_stdout_stderr,
+        output_bytes_cap,
+    });
+
+    let exit_code = loop {
+        tokio::select! {
+            control = control_rx.recv(), if control_open => {
+                match control {
+                    Some(CommandControlRequest { control, response_tx }) => {
+                        let result = match control {
+                            CommandControl::Write { delta, close_stdin } => {
+                                handle_process_write(
+                                    &session,
+                                    stream_stdin,
+                                    delta,
+                                    close_stdin,
+                                ).await
+                            }
+                            CommandControl::Resize { size } => {
+                                handle_process_resize(&session, size)
+                            }
+                            CommandControl::Terminate => {
+                                session.request_terminate();
+                                Ok(())
+                            }
+                        };
+                        if let Some(response_tx) = response_tx {
+                            let _ = response_tx.send(result);
+                        }
+                    },
+                    None => {
+                        control_open = false;
+                        session.request_terminate();
+                    }
+                }
+            }
+            outcome = &mut expiration, if expiration_outcome.is_none() => {
+                expiration_outcome = Some(outcome);
+                session.request_terminate();
+            }
+            exit = &mut exit_rx => {
+                if matches!(expiration_outcome, Some(ExecExpirationOutcome::TimedOut)) {
+                    break EXEC_TIMEOUT_EXIT_CODE;
+                } else {
+                    break exit.unwrap_or(-1);
+                }
+            }
+        }
+    };
+
+    let timeout_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(IO_DRAIN_TIMEOUT_MS)).await;
+        let _ = stdio_timeout_tx.send(true);
+    });
+
+    let stdout = stdout_handle.await.unwrap_or_default();
+    let stderr = stderr_handle.await.unwrap_or_default();
+    timeout_handle.abort();
+
+    outgoing
+        .send_response(
+            request_id,
+            CommandExecResponse {
+                exit_code,
+                stdout,
+                stderr,
+            },
+        )
+        .await;
+}
+
+fn spawn_process_output(params: SpawnProcessOutputParams) -> tokio::task::JoinHandle<String> {
+    let SpawnProcessOutputParams {
+        connection_id,
+        process_id,
+        mut output_rx,
+        mut stdio_timeout_rx,
+        outgoing,
+        stream,
+        stream_output,
+        output_bytes_cap,
+    } = params;
+    tokio::spawn(async move {
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut observed_num_bytes = 0usize;
+        loop {
+            let mut chunk = tokio::select! {
+                chunk = output_rx.recv() => match chunk {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+                _ = stdio_timeout_rx.wait_for(|&v| v) => break,
+            };
+            // Individual chunks are at most 8KiB, so overshooting a bit is acceptable.
+            while chunk.len() < OUTPUT_CHUNK_SIZE_HINT
+                && let Ok(next_chunk) = output_rx.try_recv()
+            {
+                chunk.extend_from_slice(&next_chunk);
+            }
+            let capped_chunk = match output_bytes_cap {
+                Some(output_bytes_cap) => {
+                    let capped_chunk_len = output_bytes_cap
+                        .saturating_sub(observed_num_bytes)
+                        .min(chunk.len());
+                    observed_num_bytes += capped_chunk_len;
+                    &chunk[0..capped_chunk_len]
+                }
+                None => chunk.as_slice(),
+            };
+            let cap_reached = Some(observed_num_bytes) == output_bytes_cap;
+            if let (true, Some(process_id)) = (stream_output, process_id.as_ref()) {
+                outgoing
+                    .send_server_notification_to_connection_and_wait(
+                        connection_id,
+                        ServerNotification::CommandExecOutputDelta(
+                            CommandExecOutputDeltaNotification {
+                                process_id: process_id.clone(),
+                                stream,
+                                delta_base64: STANDARD.encode(capped_chunk),
+                                cap_reached,
+                            },
+                        ),
+                    )
+                    .await;
+            } else if !stream_output {
+                buffer.extend_from_slice(capped_chunk);
+            }
+            if cap_reached {
+                break;
+            }
+        }
+        bytes_to_string_smart(&buffer)
+    })
+}
+
+async fn handle_process_write(
+    session: &ProcessHandle,
+    stream_stdin: bool,
+    delta: Vec<u8>,
+    close_stdin: bool,
+) -> Result<(), JSONRPCErrorError> {
+    if !stream_stdin {
+        return Err(invalid_request(
+            "stdin streaming is not enabled for this command/exec",
+        ));
+    }
+    if !delta.is_empty() {
+        session
+            .writer_sender()
+            .send(delta)
+            .await
+            .map_err(|_| invalid_request("stdin is already closed"))?;
+    }
+    if close_stdin {
+        session.close_stdin();
+    }
+    Ok(())
+}
+
+fn handle_process_resize(
+    session: &ProcessHandle,
+    size: TerminalSize,
+) -> Result<(), JSONRPCErrorError> {
+    session
+        .resize(size)
+        .map_err(|err| invalid_request(format!("failed to resize PTY: {err}")))
+}
+
+pub(crate) fn terminal_size_from_protocol(
+    size: CommandExecTerminalSize,
+) -> Result<TerminalSize, JSONRPCErrorError> {
+    if size.rows == 0 || size.cols == 0 {
+        return Err(invalid_params(
+            "command/exec size rows and cols must be greater than 0",
+        ));
+    }
+    Ok(TerminalSize {
+        rows: size.rows,
+        cols: size.cols,
+    })
+}
+
+fn command_no_longer_running_error(process_id: &InternalProcessId) -> JSONRPCErrorError {
+    invalid_request(format!(
+        "command/exec {} is no longer running",
+        process_id.error_repr(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::error_code::INVALID_REQUEST_ERROR_CODE;
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfile;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use pretty_assertions::assert_eq;
+    #[cfg(not(target_os = "windows"))]
+    use tokio::time::Duration;
+    #[cfg(not(target_os = "windows"))]
+    use tokio::time::timeout;
+    #[cfg(not(target_os = "windows"))]
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    #[cfg(not(target_os = "windows"))]
+    use crate::outgoing_message::OutgoingEnvelope;
+    #[cfg(not(target_os = "windows"))]
+    use crate::outgoing_message::OutgoingMessage;
+
+    fn windows_sandbox_exec_request() -> ExecRequest {
+        let cwd = AbsolutePathBuf::current_dir().expect("current dir");
+        ExecRequest::new(
+            vec!["cmd".to_string()],
+            cwd.clone(),
+            HashMap::new(),
+            /*network*/ None,
+            /*network_environment_id*/ None,
+            ExecExpiration::DefaultTimeout,
+            codex_core::exec::ExecCapturePolicy::ShellTool,
+            SandboxType::WindowsRestrictedToken,
+            vec![cwd],
+            WindowsSandboxLevel::Disabled,
+            /*windows_sandbox_private_desktop*/ false,
+            PermissionProfile::read_only(),
+            /*arg0*/ None,
+        )
+    }
+
+    #[tokio::test]
+    async fn windows_sandbox_streaming_exec_is_rejected() {
+        let (tx, _rx) = mpsc::channel(1);
+        let manager = CommandExecManager::default();
+        let err = manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id: ConnectionRequestId {
+                    connection_id: ConnectionId(1),
+                    request_id: codex_app_server_protocol::RequestId::Integer(42),
+                },
+                process_id: Some("proc-42".to_string()),
+                exec_request: windows_sandbox_exec_request(),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: true,
+                output_bytes_cap: None,
+                size: None,
+            })
+            .await
+            .expect_err("streaming windows sandbox exec should be rejected");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(
+            err.message,
+            "streaming command/exec is not supported with windows sandbox"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn windows_sandbox_non_streaming_exec_uses_execution_path() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(7),
+            request_id: codex_app_server_protocol::RequestId::Integer(99),
+        };
+
+        manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id: request_id.clone(),
+                process_id: Some("proc-99".to_string()),
+                exec_request: windows_sandbox_exec_request(),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(DEFAULT_OUTPUT_BYTES_CAP),
+                size: None,
+            })
+            .await
+            .expect("non-streaming windows sandbox exec should start");
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for outgoing message")
+            .expect("channel closed before outgoing message");
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+        else {
+            panic!("expected connection-scoped outgoing message");
+        };
+        assert_eq!(connection_id, request_id.connection_id);
+        let OutgoingMessage::Error(error) = message else {
+            panic!("expected execution failure to be reported as an error");
+        };
+        assert_eq!(error.id, request_id.request_id);
+        assert!(error.error.message.starts_with("exec failed:"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn cancellation_expiration_keeps_process_alive_until_terminated() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(8),
+            request_id: codex_app_server_protocol::RequestId::Integer(100),
+        };
+        let cwd = AbsolutePathBuf::current_dir().expect("current dir");
+
+        manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id: request_id.clone(),
+                process_id: Some("proc-100".to_string()),
+                exec_request: ExecRequest::new(
+                    vec!["sh".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+                    cwd.clone(),
+                    HashMap::new(),
+                    /*network*/ None,
+                    /*network_environment_id*/ None,
+                    ExecExpiration::Cancellation(CancellationToken::new()),
+                    codex_core::exec::ExecCapturePolicy::ShellTool,
+                    SandboxType::None,
+                    vec![cwd.clone()],
+                    WindowsSandboxLevel::Disabled,
+                    /*windows_sandbox_private_desktop*/ false,
+                    PermissionProfile::read_only(),
+                    /*arg0*/ None,
+                ),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(DEFAULT_OUTPUT_BYTES_CAP),
+                size: None,
+            })
+            .await
+            .expect("cancellation-based exec should start");
+
+        assert!(
+            timeout(Duration::from_millis(250), rx.recv())
+                .await
+                .is_err(),
+            "command/exec should remain active until explicit termination",
+        );
+
+        manager
+            .terminate(
+                request_id.clone(),
+                CommandExecTerminateParams {
+                    process_id: "proc-100".to_string(),
+                },
+            )
+            .await
+            .expect("terminate should succeed");
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for outgoing message")
+            .expect("channel closed before outgoing message");
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+        else {
+            panic!("expected connection-scoped outgoing message");
+        };
+        assert_eq!(connection_id, request_id.connection_id);
+        let OutgoingMessage::Response(response) = message else {
+            panic!("expected execution response after termination");
+        };
+        assert_eq!(response.id, request_id.request_id);
+        let codex_app_server_protocol::ClientResponsePayload::OneOffCommandExec(response) =
+            *response.result
+        else {
+            panic!("expected command/exec response");
+        };
+        assert_ne!(response.exit_code, 0);
+        assert_eq!(response.stdout, "");
+        // The deferred response now drains any already-emitted stderr before
+        // replying, so shell startup noise is allowed here.
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn timeout_or_cancellation_reports_cancellation_without_timeout_exit_code() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(9),
+            request_id: codex_app_server_protocol::RequestId::Integer(101),
+        };
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let cwd = AbsolutePathBuf::current_dir().expect("current dir");
+
+        manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id: request_id.clone(),
+                process_id: Some("proc-101".to_string()),
+                exec_request: ExecRequest::new(
+                    vec!["sh".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+                    cwd.clone(),
+                    HashMap::new(),
+                    /*network*/ None,
+                    /*network_environment_id*/ None,
+                    ExecExpiration::TimeoutOrCancellation {
+                        timeout: Duration::from_secs(30),
+                        cancellation,
+                    },
+                    codex_core::exec::ExecCapturePolicy::ShellTool,
+                    SandboxType::None,
+                    vec![cwd],
+                    WindowsSandboxLevel::Disabled,
+                    /*windows_sandbox_private_desktop*/ false,
+                    PermissionProfile::read_only(),
+                    /*arg0*/ None,
+                ),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(DEFAULT_OUTPUT_BYTES_CAP),
+                size: None,
+            })
+            .await
+            .expect("timeout-or-cancellation exec should start");
+
+        cancel.cancel();
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for outgoing message")
+            .expect("channel closed before outgoing message");
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message,
+            ..
+        } = envelope
+        else {
+            panic!("expected connection-scoped outgoing message");
+        };
+        assert_eq!(connection_id, request_id.connection_id);
+        let OutgoingMessage::Response(response) = message else {
+            panic!("expected execution response after cancellation");
+        };
+        assert_eq!(response.id, request_id.request_id);
+        let codex_app_server_protocol::ClientResponsePayload::OneOffCommandExec(response) =
+            *response.result
+        else {
+            panic!("expected command/exec response");
+        };
+        assert_ne!(response.exit_code, EXEC_TIMEOUT_EXIT_CODE);
+    }
+
+    #[tokio::test]
+    async fn windows_sandbox_process_ids_reject_write_requests() {
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(11),
+            request_id: codex_app_server_protocol::RequestId::Integer(1),
+        };
+        let process_id = ConnectionProcessId {
+            connection_id: request_id.connection_id,
+            process_id: InternalProcessId::Client("proc-11".to_string()),
+        };
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(process_id, CommandExecSession::UnsupportedWindowsSandbox);
+
+        let err = manager
+            .write(
+                request_id,
+                CommandExecWriteParams {
+                    process_id: "proc-11".to_string(),
+                    delta_base64: Some(STANDARD.encode("hello")),
+                    close_stdin: false,
+                },
+            )
+            .await
+            .expect_err("windows sandbox process ids should reject command/exec/write");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(
+            err.message,
+            "command/exec/write, command/exec/terminate, and command/exec/resize are not supported for windows sandbox processes"
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_sandbox_process_ids_reject_terminate_requests() {
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(12),
+            request_id: codex_app_server_protocol::RequestId::Integer(2),
+        };
+        let process_id = ConnectionProcessId {
+            connection_id: request_id.connection_id,
+            process_id: InternalProcessId::Client("proc-12".to_string()),
+        };
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(process_id, CommandExecSession::UnsupportedWindowsSandbox);
+
+        let err = manager
+            .terminate(
+                request_id,
+                CommandExecTerminateParams {
+                    process_id: "proc-12".to_string(),
+                },
+            )
+            .await
+            .expect_err("windows sandbox process ids should reject command/exec/terminate");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(
+            err.message,
+            "command/exec/write, command/exec/terminate, and command/exec/resize are not supported for windows sandbox processes"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_control_request_is_reported_as_not_running() {
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(13),
+            request_id: codex_app_server_protocol::RequestId::Integer(3),
+        };
+        let process_id = InternalProcessId::Client("proc-13".to_string());
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        manager.sessions.lock().await.insert(
+            ConnectionProcessId {
+                connection_id: request_id.connection_id,
+                process_id: process_id.clone(),
+            },
+            CommandExecSession::Active { control_tx },
+        );
+
+        tokio::spawn(async move {
+            let _request = control_rx
+                .recv()
+                .await
+                .expect("expected queued control request");
+        });
+
+        let err = manager
+            .terminate(
+                request_id,
+                CommandExecTerminateParams {
+                    process_id: "proc-13".to_string(),
+                },
+            )
+            .await
+            .expect_err("dropped control request should be treated as not running");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(err.message, "command/exec \"proc-13\" is no longer running");
+    }
+}
