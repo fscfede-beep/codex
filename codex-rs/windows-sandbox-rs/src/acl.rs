@@ -503,6 +503,7 @@ unsafe fn dacl_has_deny_mask(p_dacl: *mut ACL, scope: DenyAceScope, deny_mask: u
 // on protected children such as `.git` or an explicit read-only subpath.
 const WRITE_ALLOW_MASK: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+pub(crate) const DELETE_DENY_MASK: u32 = DELETE | FILE_DELETE_CHILD;
 
 unsafe fn dacl_allow_mask_needs_refresh(
     p_dacl: *mut ACL,
@@ -771,10 +772,16 @@ pub unsafe fn add_deny_write_ace(path: &Path, psid: *mut c_void) -> Result<bool>
     add_deny_ace(path, psid, DenyAceKind::Write)
 }
 
+/// Add an explicit deny for DELETE and FILE_DELETE_CHILD for a root-scoped SID.
+pub(crate) unsafe fn add_deny_delete_ace(path: &Path, psid: *mut c_void) -> Result<bool> {
+    add_deny_ace(path, psid, DenyAceKind::Delete)
+}
+
 #[derive(Clone, Copy)]
 enum DenyAceKind {
     Read,
     Write,
+    Delete,
 }
 
 impl DenyAceKind {
@@ -791,6 +798,7 @@ impl DenyAceKind {
                     | DELETE
                     | FILE_DELETE_CHILD
             }
+            Self::Delete => DELETE_DENY_MASK,
         }
     }
 
@@ -798,6 +806,11 @@ impl DenyAceKind {
         match self {
             Self::Read => dacl_has_read_deny_for_sid(p_dacl, psid),
             Self::Write => dacl_has_write_deny_for_sid(p_dacl, psid),
+            Self::Delete => dacl_has_deny_mask(
+                p_dacl,
+                DenyAceScope::EffectiveForSid(psid),
+                DELETE_DENY_MASK,
+            ),
         }
     }
 }
@@ -898,200 +911,3 @@ unsafe fn add_deny_ace(path: &Path, psid: *mut c_void, kind: DenyAceKind) -> Res
                 1,
                 DACL_SECURITY_INFORMATION,
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                p_new_dacl,
-                std::ptr::null_mut(),
-            );
-            acl_api_result(path, "SetSecurityInfo", code3).map(|()| true)
-        };
-        if !p_new_dacl.is_null() {
-            LocalFree(p_new_dacl as HLOCAL);
-        }
-        result
-    };
-    if !p_sd.is_null() {
-        LocalFree(p_sd as HLOCAL);
-    }
-    result
-}
-
-fn ensure_handle_is_not_filesystem_root(handle: &std::fs::File, path: &Path) -> Result<()> {
-    let mut buffer = [0_u16; 2];
-    let length = unsafe {
-        GetFinalPathNameByHandleW(
-            handle.as_raw_handle() as _,
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-            VOLUME_NAME_NONE,
-        )
-    };
-    if length == 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("resolve deny-read ACL target {}", path.display()));
-    }
-    ensure!(
-        length != 1 || buffer[0] != b'\\' as u16,
-        "refusing to apply a deny-read ACE to filesystem root {}",
-        path.display()
-    );
-    Ok(())
-}
-
-/// Adds a deny ACE to prevent reads for the given SID on the target path.
-///
-/// `SetEntriesInAclW` places newly-created deny ACEs before allow ACEs, which
-/// keeps the resulting DACL in the order Windows expects for denies to win.
-/// The ACE is inheritable so a deny applied to a materialized directory also
-/// covers files and directories later created underneath it.
-///
-/// # Safety
-/// Caller must ensure `psid` points to a valid SID and `path` refers to an existing file or directory.
-pub unsafe fn add_deny_read_ace(path: &Path, psid: *mut c_void) -> Result<bool> {
-    add_deny_ace(path, psid, DenyAceKind::Read)
-}
-
-#[cfg(test)]
-#[path = "acl_tests.rs"]
-mod tests;
-
-/// Removes explicit ACEs for one SID and propagates the updated inherited ACL.
-///
-/// # Safety
-/// Caller must pass a valid SID pointer and have authority to edit the target DACL.
-pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) -> Result<()> {
-    let mut p_sd: *mut c_void = std::ptr::null_mut();
-    let mut p_dacl: *mut ACL = std::ptr::null_mut();
-    let code = GetNamedSecurityInfoW(
-        to_wide(path).as_ptr(),
-        1,
-        DACL_SECURITY_INFORMATION,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        &mut p_dacl,
-        std::ptr::null_mut(),
-        &mut p_sd,
-    );
-    if code != ERROR_SUCCESS {
-        if !p_sd.is_null() {
-            LocalFree(p_sd as HLOCAL);
-        }
-        return acl_api_result(path, "GetNamedSecurityInfoW", code);
-    }
-    if p_dacl.is_null() {
-        // A null DACL has no ACE to revoke; replacing it with an empty ACL would deny access.
-        if !p_sd.is_null() {
-            LocalFree(p_sd as HLOCAL);
-        }
-        return Ok(());
-    }
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_UNKNOWN,
-        ptstrName: psid as *mut u16,
-    };
-    let mut explicit: EXPLICIT_ACCESS_W = std::mem::zeroed();
-    explicit.grfAccessPermissions = 0;
-    explicit.grfAccessMode = 4; // REVOKE_ACCESS
-    explicit.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
-    explicit.Trustee = trustee;
-    let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
-    let result = acl_api_result(
-        path,
-        "SetEntriesInAclW",
-        SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl),
-    )
-    .and_then(|()| {
-        // REVOKE_ACCESS only removes ACEs. An unchanged ACL must not propagate inheritance.
-        if (*p_new_dacl).AceCount == (*p_dacl).AceCount {
-            return Ok(());
-        }
-        let code = SetNamedSecurityInfoW(
-            to_wide(path).as_ptr() as *mut u16,
-            1,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            p_new_dacl,
-            std::ptr::null_mut(),
-        );
-        acl_api_result(path, "SetNamedSecurityInfoW", code)
-    });
-    if !p_new_dacl.is_null() {
-        LocalFree(p_new_dacl as HLOCAL);
-    }
-    if !p_sd.is_null() {
-        LocalFree(p_sd as HLOCAL);
-    }
-    result
-}
-
-/// Grants RX to the null device for the given SID to support stdout/stderr redirection.
-///
-/// # Safety
-/// Caller must ensure `psid` is a valid SID pointer.
-pub unsafe fn allow_null_device(psid: *mut c_void) {
-    let desired = 0x00020000 | 0x00040000; // READ_CONTROL | WRITE_DAC
-    let h = CreateFileW(
-        to_wide(r"\\\\.\\NUL").as_ptr(),
-        desired,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        std::ptr::null_mut(),
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        0,
-    );
-    if h == 0 || h == INVALID_HANDLE_VALUE {
-        return;
-    }
-    let mut p_sd: *mut c_void = std::ptr::null_mut();
-    let mut p_dacl: *mut ACL = std::ptr::null_mut();
-    let code = GetSecurityInfo(
-        h,
-        SE_KERNEL_OBJECT as i32,
-        DACL_SECURITY_INFORMATION,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        &mut p_dacl,
-        std::ptr::null_mut(),
-        &mut p_sd,
-    );
-    if code == ERROR_SUCCESS {
-        let trustee = TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: 0,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_UNKNOWN,
-            ptstrName: psid as *mut u16,
-        };
-        let mut explicit: EXPLICIT_ACCESS_W = std::mem::zeroed();
-        explicit.grfAccessPermissions =
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
-        explicit.grfAccessMode = 2; // SET_ACCESS
-        explicit.grfInheritance = 0;
-        explicit.Trustee = trustee;
-        let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
-        let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
-        if code2 == ERROR_SUCCESS {
-            let _ = SetSecurityInfo(
-                h,
-                SE_KERNEL_OBJECT as i32,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                p_new_dacl,
-                std::ptr::null_mut(),
-            );
-            if !p_new_dacl.is_null() {
-                LocalFree(p_new_dacl as HLOCAL);
-            }
-        }
-    }
-    if !p_sd.is_null() {
-        LocalFree(p_sd as HLOCAL);
-    }
-    CloseHandle(h);
-}
-const CONTAINER_INHERIT_ACE: u32 = 0x2;
-const OBJECT_INHERIT_ACE: u32 = 0x1;
