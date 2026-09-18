@@ -272,21 +272,29 @@ pub struct SandboxManager {
     seatbelt_profile: MacosSeatbeltProfile,
     #[cfg(target_os = "macos")]
     allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
+    /// Deny unlink/rename/delete effects for normal process sandboxes.
+    /// File-system helpers use a separate manager because they are already
+    /// confined by their own OS sandbox and must retain delete semantics.
+    deny_file_deletion: bool,
 }
 
 impl SandboxManager {
     pub fn new() -> Self {
-        Self::default()
+        let mut manager = Self::default();
+        manager.deny_file_deletion = true;
+        manager
     }
 
     /// Creates a manager that applies the narrower runtime profile required by filesystem helpers.
     pub fn for_file_system_helpers() -> Self {
-        Self {
-            #[cfg(target_os = "macos")]
-            seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
-            #[cfg(target_os = "macos")]
-            allowed_symlinked_codex_home: None,
+        let mut manager = Self::default();
+        manager.deny_file_deletion = false;
+        #[cfg(target_os = "macos")]
+        {
+            manager.seatbelt_profile = MacosSeatbeltProfile::FileSystemHelper;
+            manager.allowed_symlinked_codex_home = None;
         }
+        manager
     }
 
     /// Allows otherwise-authorized writable roots beneath the opted-in user home
@@ -379,6 +387,11 @@ impl SandboxManager {
         let (argv, arg0_override, pending_sandboxed_request) = match sandbox {
             SandboxType::None => (argv, None, None),
             SandboxType::WindowsMxc => {
+                if self.deny_file_deletion {
+                    return Err(SandboxTransformError::WindowsMxcPreparation(
+                        "delete fence is unavailable in Windows MXC sandbox".to_string(),
+                    ));
+                }
                 if windows_sandbox_private_desktop {
                     return Err(SandboxTransformError::WindowsMxcPreparation(
                         "private desktop isolation is not supported by MXC".to_string(),
@@ -454,6 +467,7 @@ impl SandboxManager {
                     },
                     self.seatbelt_profile,
                     self.allowed_symlinked_codex_home.as_ref(),
+                    self.deny_file_deletion,
                 )
                 .map_err(|err| match err {
                     SeatbeltPreparationError::FileSystem(message) => {
@@ -507,6 +521,7 @@ impl SandboxManager {
                     pending.native_sandbox_policy_cwd.as_path(),
                     use_legacy_landlock,
                     managed_network.as_ref(),
+                    self.deny_file_deletion,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
@@ -598,6 +613,7 @@ impl SandboxManager {
                 workspace_roots,
                 codex_home,
                 proxy_settings_mode,
+                self.deny_file_deletion,
             )?;
         }
         Ok(request)
@@ -610,6 +626,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
     workspace_roots: &[AbsolutePathBuf],
     codex_home: &Path,
     proxy_settings_mode: codex_windows_sandbox::WindowsSandboxProxySettingsMode,
+    deny_file_deletion: bool,
 ) -> Result<(), SandboxTransformError> {
     // TODO(anp): Keep PathUri through the Windows sandbox wrapper boundary.
     let native_cwd =
@@ -701,6 +718,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             deny_read_paths_override,
             deny_write_paths_override,
             codex_home,
+            deny_file_deletion,
         )
         .map_err(|err| SandboxTransformError::WindowsSandboxPreparation(err.to_string()))?;
 
