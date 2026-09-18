@@ -69,6 +69,164 @@ impl FsRequestProcessor {
     }
 
     fn validate_managed_storage_path(
+        &self,
+        path: &codex_utils_absolute_path::AbsolutePathBuf,
+    ) -> Result<(), JSONRPCErrorError> {
+        validate_managed_storage_path(path.as_path(), &self.managed_storage_root)
+    }
+    fn managed_storage_sandbox(&self) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
+        ensure_managed_storage_root_exists(&self.managed_storage_root)?;
+        managed_storage_sandbox_for_root(&self.managed_storage_root)
+    }
+
+    pub(crate) async fn read_file(
+        &self,
+        params: FsReadFileParams,
+    ) -> Result<FsReadFileResponse, JSONRPCErrorError> {
+        let path = PathUri::from_abs_path(&params.path);
+        let bytes = self
+            .file_system()?
+            .read_file(&path, Default::default(), /*sandbox*/ None)
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsReadFileResponse {
+            data_base64: STANDARD.encode(bytes),
+        })
+    }
+
+    pub(crate) async fn write_file(
+        &self,
+        params: FsWriteFileParams,
+    ) -> Result<FsWriteFileResponse, JSONRPCErrorError> {
+        let bytes = STANDARD.decode(params.data_base64).map_err(|err| {
+            invalid_request(format!(
+                "fs/writeFile requires valid base64 dataBase64: {err}"
+            ))
+        })?;
+        let sandbox = self.managed_storage_sandbox()?;
+        self.validate_managed_storage_path(&params.path)?;
+        let path = PathUri::from_abs_path(&params.path);
+        self.file_system()?
+            .write_file(&path, bytes, Default::default(), Some(&sandbox))
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsWriteFileResponse {})
+    }
+
+    pub(crate) async fn create_directory(
+        &self,
+        params: FsCreateDirectoryParams,
+    ) -> Result<FsCreateDirectoryResponse, JSONRPCErrorError> {
+        let sandbox = self.managed_storage_sandbox()?;
+        self.validate_managed_storage_path(&params.path)?;
+        let path = PathUri::from_abs_path(&params.path);
+        self.file_system()?
+            .create_directory(
+                &path,
+                CreateDirectoryOptions {
+                    recursive: params.recursive.unwrap_or(true),
+                    follow_symlinks: true,
+                },
+                Some(&sandbox),
+            )
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsCreateDirectoryResponse {})
+    }
+
+    pub(crate) async fn get_metadata(
+        &self,
+        params: FsGetMetadataParams,
+    ) -> Result<FsGetMetadataResponse, JSONRPCErrorError> {
+        let path = PathUri::from_abs_path(&params.path);
+        let metadata = self
+            .file_system()?
+            .get_metadata(&path, Default::default(), /*sandbox*/ None)
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsGetMetadataResponse {
+            is_directory: metadata.is_directory,
+            is_file: metadata.is_file,
+            is_symlink: metadata.is_symlink,
+            created_at_ms: metadata.created_at_ms,
+            modified_at_ms: metadata.modified_at_ms,
+        })
+    }
+
+    pub(crate) async fn read_directory(
+        &self,
+        params: FsReadDirectoryParams,
+    ) -> Result<FsReadDirectoryResponse, JSONRPCErrorError> {
+        let path = PathUri::from_abs_path(&params.path);
+        let entries = self
+            .file_system()?
+            .read_directory(&path, /*sandbox*/ None)
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsReadDirectoryResponse {
+            entries: entries
+                .into_iter()
+                .map(|entry| FsReadDirectoryEntry {
+                    file_name: entry.file_name,
+                    is_directory: entry.is_directory,
+                    is_file: entry.is_file,
+                })
+                .collect(),
+        })
+    }
+
+    pub(crate) async fn remove(
+        &self,
+        _params: FsRemoveParams,
+    ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
+        Err(invalid_request(
+            "fs/remove is disabled: destructive filesystem deletion requires the governed approval and sandbox path",
+        ))
+    }
+
+    pub(crate) async fn copy(
+        &self,
+        params: FsCopyParams,
+    ) -> Result<FsCopyResponse, JSONRPCErrorError> {
+        let sandbox = self.managed_storage_sandbox()?;
+        self.validate_managed_storage_path(&params.source_path)?;
+        self.validate_managed_storage_path(&params.destination_path)?;
+        let source_path = PathUri::from_abs_path(&params.source_path);
+        let destination_path = PathUri::from_abs_path(&params.destination_path);
+        self.file_system()?
+            .copy(
+                &source_path,
+                &destination_path,
+                CopyOptions {
+                    recursive: params.recursive,
+                },
+                Some(&sandbox),
+            )
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsCopyResponse {})
+    }
+
+    pub(crate) async fn watch(
+        &self,
+        connection_id: ConnectionId,
+        params: FsWatchParams,
+    ) -> Result<FsWatchResponse, JSONRPCErrorError> {
+        self.file_system()?;
+        self.fs_watch_manager.watch(connection_id, params).await
+    }
+
+    pub(crate) async fn unwatch(
+        &self,
+        connection_id: ConnectionId,
+        params: FsUnwatchParams,
+    ) -> Result<FsUnwatchResponse, JSONRPCErrorError> {
+        self.file_system()?;
+        self.fs_watch_manager.unwatch(connection_id, params).await
+    }
+}
+
+fn validate_managed_storage_path(
     path: &Path,
     managed_root: &Path,
 ) -> Result<(), JSONRPCErrorError> {
@@ -96,33 +254,21 @@ impl FsRequestProcessor {
         ))
     })?;
 
-    // The managed root itself must be a real directory, not a symlink/junction/reparse alias.
-    let canonical_root = match std::fs::symlink_metadata(managed_root) {
-        Ok(metadata) => {
-            if !metadata.is_dir() || managed_root_is_alias(&metadata) {
-                return Err(invalid_request(
-                    "managed attachments root must be a real directory without reparse aliases",
-                ));
-            }
-            std::fs::canonicalize(managed_root).map_err(|err| {
-                invalid_request(format!(
-                    "cannot canonicalize managed attachments root: {err}"
-                ))
-            })?
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let root_name = managed_root.file_name().ok_or_else(|| {
-                invalid_request("managed filesystem root has no final path component")
-            })?;
-            canonical_home.join(root_name)
-        }
-        Err(err) => {
-            return Err(invalid_request(format!(
-                "cannot inspect managed attachments root: {err}"
-            )));
-        }
-    };
-
+    let root_metadata = std::fs::symlink_metadata(managed_root).map_err(|err| {
+        invalid_request(format!(
+            "cannot inspect managed attachments root: {err}"
+        ))
+    })?;
+    if !root_metadata.is_dir() || managed_root_is_alias(&root_metadata) {
+        return Err(invalid_request(
+            "managed attachments root must be a real directory without reparse aliases",
+        ));
+    }
+    let canonical_root = std::fs::canonicalize(managed_root).map_err(|err| {
+        invalid_request(format!(
+            "cannot canonicalize managed attachments root: {err}"
+        ))
+    })?;
     if !canonical_root.starts_with(&canonical_home) {
         return Err(invalid_request(
             "managed attachments root resolves outside CODEX_HOME",
@@ -138,16 +284,12 @@ impl FsRequestProcessor {
         ))
     })?;
 
-    // The security boundary is attachments itself, not the broader CODEX_HOME parent.
     if !canonical_existing.starts_with(&canonical_root) {
         return Err(invalid_request(
             "filesystem mutation path resolves outside managed attachments",
         ));
     }
 
-    // Reject explicit aliases in the existing path chain. Unix uses canonical-vs-lexical
-    // identity; Windows uses the native reparse-point bit so normal Win32 path normalization
-    // does not cause false positives.
     if managed_storage_path_contains_alias(existing, &canonical_existing) {
         return Err(invalid_request(
             "filesystem mutation path contains an existing alias or reparse point",
@@ -211,11 +353,38 @@ fn closest_existing_ancestor(path: &Path) -> Option<&Path> {
 }
 
 fn ensure_managed_storage_root_exists(root_path: &Path) -> Result<(), JSONRPCErrorError> {
-    std::fs::create_dir_all(root_path).map_err(|err| {
-        invalid_request(format!(
-            "cannot initialize managed attachments root for sandbox enforcement: {err}"
-        ))
-    })
+    match std::fs::symlink_metadata(root_path) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || managed_root_is_alias(&metadata) {
+                return Err(invalid_request(
+                    "managed attachments root must be a real directory without reparse aliases",
+                ));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(root_path).map_err(|err| {
+                invalid_request(format!(
+                    "cannot initialize managed attachments root for sandbox enforcement: {err}"
+                ))
+            })?;
+
+            let metadata = std::fs::symlink_metadata(root_path).map_err(|err| {
+                invalid_request(format!(
+                    "cannot verify managed attachments root after initialization: {err}"
+                ))
+            })?;
+            if !metadata.is_dir() || managed_root_is_alias(&metadata) {
+                return Err(invalid_request(
+                    "managed attachments root must be a real directory without reparse aliases",
+                ));
+            }
+            Ok(())
+        }
+        Err(err) => Err(invalid_request(format!(
+            "cannot inspect managed attachments root: {err}"
+        ))),
+    }
 }
 
 fn managed_storage_sandbox_for_root(
@@ -262,6 +431,18 @@ mod tests {
     }
 
     #[test]
+    fn managed_storage_initializes_missing_root_before_validation() -> io::Result<()> {
+        let home = tempdir()?;
+        let managed_root = home.path().join("attachments");
+        let target = managed_root.join("id").join("file.txt");
+        assert!(!managed_root.exists());
+        ensure_managed_storage_root_exists(&managed_root).map_err(|err| io::Error::other(err.to_string()))?;
+        assert!(managed_root.is_dir());
+        assert!(validate_managed_storage_path(&target, &managed_root).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn managed_storage_sandbox_is_managed_and_scoped() -> io::Result<()> {
         let home = tempdir()?;
         let managed_root = home.path().join("attachments");
@@ -296,6 +477,7 @@ mod tests {
         assert!(validate_managed_storage_path(&target, &managed_root).is_err());
         Ok(())
     }
+
     #[cfg(unix)]
     #[test]
     fn managed_storage_rejects_alias_to_other_codex_home_subtree() -> io::Result<()> {
@@ -328,5 +510,4 @@ mod tests {
         assert!(validate_managed_storage_path(&target, &managed_root).is_err());
         Ok(())
     }
-
 }
