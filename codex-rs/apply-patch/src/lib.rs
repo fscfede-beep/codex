@@ -467,6 +467,18 @@ pub async fn apply_patch_with_destructive_targets(
     sandbox: Option<&FileSystemSandboxContext>,
     destructive_targets: &[DestructivePatchTarget],
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    // Only the caller that completed destructive verification may reach this execution boundary.
+    // The public convenience API deliberately does not mint these preconditions.
+    if destructive_targets.is_empty() {
+        return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+            context: "destructive apply_patch authorization".to_string(),
+            source: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive apply_patch requires verified object-identity preconditions",
+            ),
+        })));
+    }
+
     let hunks = match parse_patch(patch) {
         Ok(source) => source.hunks,
         Err(e) => {
