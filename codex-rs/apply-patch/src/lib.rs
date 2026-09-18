@@ -1229,6 +1229,87 @@ pub fn print_summary(
         writeln!(out, "D {}", path.display())?;
     }
     Ok(())
+
+    fn workspace_sandbox(cwd: &PathUri) -> FileSystemSandboxContext {
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::workspace_write_with_path_uris(
+                std::slice::from_ref(cwd),
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ),
+            cwd.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn destructive_target_appeared_after_authorization_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let target = dir.path().join("new.txt");
+        let patch = "*** Begin Patch\\n*** Add File: new.txt\\n+approved\\n*** End Patch";
+        let sandbox = workspace_sandbox(&cwd);
+
+        let action = match invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            &codex_exec_server::LOCAL_FS,
+            Some(&sandbox),
+        )
+        .await
+        {
+            invocation::MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified destructive patch, got {other:?}"),
+        };
+
+        std::fs::write(&target, "attacker content").unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = apply_patch_with_destructive_targets(
+            patch,
+            ApplyPatchOptions {
+                update_file_mode: ApplyPatchFileUpdateMode::default(),
+                follow_symlinks: false,
+            },
+            &cwd,
+            &mut stdout,
+            &mut stderr,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+            action.destructive_targets(),
+        )
+        .await
+        .expect_err("target appearance must invalidate destructive authorization");
+
+        assert!(format!("{err}").contains("target appeared after authorization"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "attacker content");
+    }
+
+    #[tokio::test]
+    async fn destructive_target_requires_existing_immediate_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let nested = dir.path().join("missing-parent").join("new.txt");
+        let patch = "*** Begin Patch\\n*** Add File: missing-parent/new.txt\\n+approved\\n*** End Patch";
+        let sandbox = workspace_sandbox(&cwd);
+
+        let result = invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await;
+
+        match result {
+            invocation::MaybeApplyPatchVerified::CorrectnessError(error) => {
+                assert!(format!("{error}").contains("existing parent"));
+            }
+            other => panic!("expected fail-closed parent validation, got {other:?}"),
+        }
+        assert!(!nested.exists());
+    }
+
 }
 
 #[cfg(test)]
