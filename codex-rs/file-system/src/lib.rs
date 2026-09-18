@@ -710,6 +710,22 @@ pub trait ExecutorFileSystem: Send + Sync {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()>;
 
+    /// Destructive removal path. Implementations must require an explicit, scoped
+    /// destructive capability; ordinary removal never implies delete authority.
+    fn remove_with_destructive_capability<'a>(
+        &'a self,
+        path: &'a PathUri,
+        remove_options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive filesystem capability is not available on this filesystem surface",
+            ))
+        })
+    }
+
     fn copy<'a>(
         &'a self,
         source_path: &'a PathUri,
