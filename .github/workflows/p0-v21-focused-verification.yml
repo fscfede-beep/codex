@@ -5,6 +5,7 @@ on:
     branches:
       - p0/v21-reconciled-review
       - p0/v22-destructive-scope-gate
+      - p0/v22-destructive-scope-gate
   pull_request:
     branches:
       - p0/v21-reconciled-review
