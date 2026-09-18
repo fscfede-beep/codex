@@ -346,6 +346,8 @@ impl CommandExecRequestProcessor {
             })
             .await
     }
+}
+
 fn govern_command_exec_profile(
     profile: PermissionProfile,
     workspace_roots: &[codex_utils_path_uri::PathUri],
