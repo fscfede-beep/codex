@@ -19,6 +19,7 @@ use crate::tools::network_approval::finish_deferred_network_approval;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::SandboxOverride;
+use codex_sandboxing::SandboxablePreference;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
@@ -235,6 +236,12 @@ impl ToolOrchestrator {
             }
         }
 
+        // The filesystem safety fence is independent of ordinary approval policy.
+        // A tool requiring it must never fall back to an unsandboxed process launch.
+        let filesystem_safety_fence_required = tool.requires_filesystem_safety_fence(req);
+        let allow_destructive_filesystem_effects =
+            tool.allow_destructive_filesystem_effects(req, already_approved);
+
         // 2) First attempt under the selected sandbox.
         let unsandboxed_allowed =
             !owner_network_policy && unsandboxed_execution_allowed(&file_system_sandbox_policy);
@@ -267,7 +274,11 @@ impl ToolOrchestrator {
         } else {
             turn_ctx.network.is_some()
         };
-        let sandbox_preference = tool.sandbox_preference();
+        let sandbox_preference = if filesystem_safety_fence_required {
+            SandboxablePreference::Require
+        } else {
+            tool.sandbox_preference()
+        };
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
@@ -290,6 +301,15 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+
+        if filesystem_safety_fence_required
+            && !executor_managed_process_sandbox
+            && initial_sandbox == SandboxType::None
+        {
+            return Err(ToolError::Rejected(
+                "required filesystem safety fence is unavailable on this executor".to_string(),
+            ));
+        }
 
         let sandbox_policy_cwd = tool
             .sandbox_cwd(req)
@@ -316,6 +336,7 @@ impl ToolOrchestrator {
             windows_sandbox_private_desktop: sandbox_config.windows_sandbox_private_desktop,
             network_denial_cancellation_token: None,
             network_proxy: None,
+            allow_destructive_filesystem_effects,
         };
 
         let initial_attempt_start = Instant::now();
@@ -356,6 +377,16 @@ impl ToolOrchestrator {
                     None
                 };
                 if network_policy_decision.is_some() && network_approval_context.is_none() {
+                    otel.sandbox_outcome(
+                        &otel_tn,
+                        otel_ci,
+                        "denied",
+                        initial_duration,
+                        /*escalated_duration*/ None,
+                    );
+                    return Err(ToolError::Codex(err));
+                }
+                if filesystem_safety_fence_required {
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,
@@ -491,6 +522,7 @@ impl ToolOrchestrator {
                     windows_sandbox_private_desktop: sandbox_config.windows_sandbox_private_desktop,
                     network_denial_cancellation_token: None,
                     network_proxy: None,
+                    allow_destructive_filesystem_effects: false,
                 };
 
                 // Second attempt.
