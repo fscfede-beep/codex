@@ -154,6 +154,48 @@ fn default_exec_approval_requirement_keeps_prompt_when_granular_allows_sandbox_a
 }
 
 #[test]
+fn filesystem_safety_fence_narrows_unrestricted_profiles_to_workspace_roots() {
+    let root = PathUri::from_host_native_path(
+        std::env::temp_dir().join("codex-p0-v29-workspace"),
+    )
+    .expect("workspace path URI");
+
+    let fenced = filesystem_safety_fence_permission_profile(
+        &codex_protocol::models::PermissionProfile::Disabled,
+        std::slice::from_ref(&root),
+    )
+    .expect("full access should narrow when a workspace root exists");
+    assert!(matches!(
+        fenced,
+        codex_protocol::models::PermissionProfile::Managed {
+            file_system: codex_protocol::models::ManagedFileSystemPermissions::Restricted { .. },
+            ..
+        }
+    ));
+    let policy = fenced.file_system_sandbox_policy();
+    assert!(policy.can_write_path(&root, &policy.context_for_cwd(&root.to_abs_path().expect("cwd").as_path())));
+
+    assert_eq!(
+        filesystem_safety_fence_permission_profile(
+            &codex_protocol::models::PermissionProfile::Disabled,
+            &[],
+        )
+        .expect_err("full access without a workspace root must fail closed"),
+        "filesystem safety fence requires at least one workspace root"
+    );
+    assert_eq!(
+        filesystem_safety_fence_permission_profile(
+            &codex_protocol::models::PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+            std::slice::from_ref(&root),
+        )
+        .expect_err("external sandbox authority cannot be silently widened"),
+        "filesystem safety fence requires Codex-managed process scope"
+    );
+}
+
+#[test]
 fn additional_permissions_allow_bypass_sandbox_first_attempt_when_execpolicy_skips() {
     assert_eq!(
         sandbox_override_for_first_attempt(
