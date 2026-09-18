@@ -275,7 +275,7 @@ async fn get_remote_default_branch_from_remote_show(
     cwd: &Path,
     remote: &str,
 ) -> Option<DefaultBranch> {
-    let output = run_git_command(runner, cwd, &["remote", "show", remote])
+    let output = run_git_command(runner, cwd, &["remote", "show", "-n", remote])
         .await
         .ok()?;
     if !output.success() {
@@ -571,6 +571,45 @@ mod tests {
     }
 
     #[tokio::test]
+    #[tokio::test]
+    async fn remote_default_branch_fallback_does_not_query_remote() {
+        let runner = FakeRunner::new(vec![
+            response(
+                &["git", "remote", "show", "-n", "origin"],
+                /*exit_code*/ 0,
+                "* remote origin\n  HEAD branch: main\n",
+            ),
+            response(
+                &[
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/main",
+                ],
+                /*exit_code*/ 0,
+                "remote-main-sha\n",
+            ),
+        ]);
+
+        let branch = get_remote_default_branch_from_remote_show(
+            &runner,
+            Path::new("/repo"),
+            "origin",
+        )
+        .await
+        .expect("default branch");
+
+        assert_eq!(
+            branch,
+            DefaultBranch {
+                merge_ref: "refs/remotes/origin/main".to_string(),
+            }
+        );
+        assert!(runner.saw(&["git", "remote", "show", "-n", "origin"]));
+        assert!(!runner.saw(&["git", "remote", "show", "origin"]));
+    }
+
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
             &["gh", "pr", "view", "--json", "number,url,state"],
