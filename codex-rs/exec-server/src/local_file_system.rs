@@ -387,6 +387,17 @@ impl ExecutorFileSystem for LocalFileSystem {
         Box::pin(LocalFileSystem::remove(self, path, options, sandbox))
     }
 
+    fn remove_with_destructive_capability<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(LocalFileSystem::remove_with_destructive_capability(
+            self, path, options, sandbox,
+        ))
+    }
+
     fn copy<'a>(
         &'a self,
         source_path: &'a PathUri,
