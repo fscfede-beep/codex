@@ -26,6 +26,7 @@ use crate::bwrap::WSL_INTEROP_DIR;
 use crate::bwrap::WSLG_DISTRO_ROOT;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
+use crate::landlock::install_file_deletion_fence_on_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
@@ -125,6 +126,10 @@ pub struct LandlockCommand {
     #[arg(long = "apply-seccomp-then-exec", hide = true, default_value_t = false)]
     pub apply_seccomp_then_exec: bool,
 
+    /// Internal: deny unlink/delete/rename effects in the final process sandbox.
+    #[arg(long = "deny-file-deletion", hide = true, default_value_t = false)]
+    pub deny_file_deletion: bool,
+
     /// Effective managed-network policy prepared for this command launch.
     #[arg(
         long,
@@ -166,6 +171,7 @@ pub fn run_main() -> ! {
         permission_profile,
         use_legacy_landlock,
         apply_seccomp_then_exec,
+        deny_file_deletion,
         managed_network,
         proxy_route_spec,
         verify_fd_mounts,
@@ -237,6 +243,11 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if deny_file_deletion {
+            if let Err(err) = install_file_deletion_fence_on_current_thread() {
+                panic!("error applying Linux file deletion fence: {err:?}");
+            }
+        }
 
         let signal_mask = ForwardedSignalMask::block();
         let command_pid = unsafe { libc::fork() };
@@ -283,6 +294,11 @@ pub fn run_main() -> ! {
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
+        if deny_file_deletion {
+            if let Err(err) = install_file_deletion_fence_on_current_thread() {
+                panic!("error applying Linux file deletion fence: {err:?}");
+            }
+        }
         exec_or_panic(command);
     }
 
@@ -328,6 +344,7 @@ pub fn run_main() -> ! {
             permission_profile: &permission_profile,
             managed_network,
             proxy_route_spec,
+            deny_file_deletion,
             command,
         });
         run_bwrap_with_proc_fallback(
@@ -349,6 +366,11 @@ pub fn run_main() -> ! {
         /*proxy_routing_active*/ false,
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+    }
+    if deny_file_deletion {
+        if let Err(err) = install_file_deletion_fence_on_current_thread() {
+            panic!("error applying Linux file deletion fence: {err:?}");
+        }
     }
     exec_or_panic(command);
 }
@@ -1516,6 +1538,7 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     managed_network: Option<ManagedNetworkSandboxContext>,
     proxy_route_spec: Option<String>,
+    deny_file_deletion: bool,
     command: Vec<String>,
 }
 
@@ -1527,6 +1550,7 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile,
         managed_network,
         proxy_route_spec,
+        deny_file_deletion,
         command,
     } = args;
     let current_exe = match std::env::current_exe() {
@@ -1562,6 +1586,9 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
             .unwrap_or_else(|| panic!("managed proxy mode requires a proxy route spec"));
         inner.push("--proxy-route-spec".to_string());
         inner.push(proxy_route_spec);
+    }
+    if deny_file_deletion {
+        inner.push("--deny-file-deletion".to_string());
     }
     inner.push("--".to_string());
     inner.extend(command);
