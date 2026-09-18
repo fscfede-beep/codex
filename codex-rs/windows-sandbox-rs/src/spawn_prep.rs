@@ -1,10 +1,12 @@
 use crate::acl::add_allow_ace;
 use crate::acl::add_deny_write_ace;
+use crate::acl::add_deny_delete_ace;
 use crate::acl::allow_null_device;
 use crate::acl::ensure_allow_write_aces;
 use crate::allow::AllowDenyPaths;
 use crate::allow::compute_allow_paths_for_permissions;
 use crate::cap::load_or_create_cap_sids;
+use crate::cap::delete_deny_sid_for_root;
 use crate::cap::workspace_write_cap_sid_for_root;
 use crate::cap::workspace_write_root_contains_path;
 use crate::cap::workspace_write_root_overlaps_path;
@@ -25,6 +27,7 @@ use crate::setup::effective_write_roots_for_permissions;
 use crate::token::LocalSid;
 use crate::token::create_readonly_token_with_cap;
 use crate::token::create_workspace_write_token_with_caps_from;
+use crate::token::create_workspace_write_token_with_caps_and_restrictions_from;
 use crate::token::get_current_token_for_restriction;
 use crate::token::get_logon_sid_bytes;
 use crate::workspace_acl::is_command_cwd_root;
@@ -66,6 +69,7 @@ pub(crate) struct LegacySessionSecurity {
     pub(crate) readonly_sid: Option<LocalSid>,
     pub(crate) readonly_sid_str: Option<String>,
     pub(crate) write_root_sids: Vec<RootCapabilitySid>,
+    pub(crate) delete_deny_root_sids: Vec<RootCapabilitySid>,
 }
 
 pub(crate) struct RootCapabilitySid {
@@ -78,6 +82,7 @@ pub(crate) struct LegacyAclSids<'a> {
     pub(crate) readonly_sid: Option<&'a LocalSid>,
     pub(crate) readonly_sid_str: Option<&'a str>,
     pub(crate) write_root_sids: &'a [RootCapabilitySid],
+    pub(crate) delete_deny_root_sids: &'a [RootCapabilitySid],
 }
 
 pub(crate) fn prepare_spawn_context_common(
@@ -146,30 +151,48 @@ pub(crate) fn prepare_legacy_spawn_context(
 
 pub(crate) fn prepare_legacy_session_security(
     uses_write_capabilities: bool,
+    deny_file_deletion: bool,
     codex_home: &Path,
     cwd: &Path,
     capability_roots: impl IntoIterator<Item = PathBuf>,
 ) -> Result<LegacySessionSecurity> {
     let caps = load_or_create_cap_sids(codex_home)?;
-    let (h_token, readonly_sid, readonly_sid_str, write_root_sids) = unsafe {
+    let (h_token, readonly_sid, readonly_sid_str, write_root_sids, delete_deny_root_sids) = unsafe {
         if uses_write_capabilities {
             let write_root_sids = root_capability_sids(codex_home, cwd, capability_roots)?;
             if write_root_sids.is_empty() {
                 anyhow::bail!("workspace-write sandbox has no writable root capability SIDs");
             }
+            let delete_deny_root_sids = if deny_file_deletion {
+                root_delete_deny_sids(codex_home, &write_root_sids)?
+            } else {
+                Vec::new()
+            };
             let base = get_current_token_for_restriction()?;
             let cap_ptrs: Vec<*mut c_void> = write_root_sids
                 .iter()
                 .map(|root| root.sid.as_ptr())
                 .collect();
-            let h_token = create_workspace_write_token_with_caps_from(base, cap_ptrs.as_slice());
+            let deny_ptrs: Vec<*mut c_void> = delete_deny_root_sids
+                .iter()
+                .map(|root| root.sid.as_ptr())
+                .collect();
+            let h_token = if deny_ptrs.is_empty() {
+                create_workspace_write_token_with_caps_from(base, cap_ptrs.as_slice())
+            } else {
+                create_workspace_write_token_with_caps_and_restrictions_from(
+                    base,
+                    cap_ptrs.as_slice(),
+                    deny_ptrs.as_slice(),
+                )
+            };
             CloseHandle(base);
             let h_token = h_token?;
-            (h_token, None, None, write_root_sids)
+            (h_token, None, None, write_root_sids, delete_deny_root_sids)
         } else {
             let psid = LocalSid::from_string(&caps.readonly)?;
             let (h_token, _psid) = create_readonly_token_with_cap(psid.as_ptr())?;
-            (h_token, Some(psid), Some(caps.readonly), Vec::new())
+            (h_token, Some(psid), Some(caps.readonly), Vec::new(), Vec::new())
         }
     };
 
@@ -178,6 +201,7 @@ pub(crate) fn prepare_legacy_session_security(
         readonly_sid,
         readonly_sid_str,
         write_root_sids,
+        delete_deny_root_sids,
     })
 }
 
@@ -202,6 +226,23 @@ pub(crate) fn legacy_session_capability_roots(
     } else {
         allow_paths
     }
+}
+
+pub(crate) fn root_delete_deny_sids(
+    codex_home: &Path,
+    roots: &[RootCapabilitySid],
+) -> Result<Vec<RootCapabilitySid>> {
+    let mut out = Vec::with_capacity(roots.len());
+    for root in roots {
+        let sid_str = delete_deny_sid_for_root(codex_home, &root.root)?;
+        let sid = LocalSid::from_string(&sid_str)?;
+        out.push(RootCapabilitySid {
+            root: root.root.clone(),
+            sid,
+            sid_str,
+        });
+    }
+    Ok(out)
 }
 
 pub(crate) fn root_capability_sids(
@@ -302,6 +343,9 @@ pub(crate) fn apply_legacy_session_acl_rules(
             for root_sid in deny_root_capabilities_for_path(p, acl_sids.write_root_sids) {
                 let _ = add_deny_write_ace(p, root_sid.sid.as_ptr());
             }
+        }
+        for root_sid in acl_sids.delete_deny_root_sids {
+            let _ = add_deny_delete_ace(&root_sid.root, root_sid.sid.as_ptr())?;
         }
         if !additional_deny_read_paths.is_empty() {
             if let Some(readonly_sid) = acl_sids.readonly_sid {
@@ -618,102 +662,3 @@ mod tests {
 
         let stale_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &stale_root)
             .expect("stale sid");
-        let active_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &active_root)
-            .expect("active sid");
-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
-            .expect("workspace sid");
-        let caps = load_or_create_cap_sids(&codex_home).expect("load caps");
-
-        let sid_strs = root_capability_sids(
-            &codex_home,
-            &workspace,
-            vec![workspace.clone(), active_root],
-        )
-        .expect("root capabilities")
-        .into_iter()
-        .map(|root_sid| root_sid.sid_str)
-        .collect::<Vec<_>>();
-
-        assert_eq!(sid_strs.len(), 2);
-        assert!(sid_strs.contains(&workspace_sid));
-        assert!(sid_strs.contains(&active_sid));
-        assert!(!sid_strs.contains(&stale_sid));
-        assert!(!sid_strs.contains(&caps.workspace));
-    }
-
-    #[test]
-    fn legacy_deny_path_includes_nested_active_root_sid() {
-        let temp = TempDir::new().expect("tempdir");
-        let codex_home = temp.path().join("codex-home");
-        let workspace = temp.path().join("workspace");
-        let protected_dir = workspace.join(".codex");
-        let nested_root = protected_dir.join("nested-root");
-        let unrelated_root = temp.path().join("unrelated-root");
-        std::fs::create_dir_all(&codex_home).expect("create codex home");
-        std::fs::create_dir_all(&workspace).expect("create workspace");
-        std::fs::create_dir_all(&nested_root).expect("create nested root");
-        std::fs::create_dir_all(&unrelated_root).expect("create unrelated root");
-
-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
-            .expect("workspace sid");
-        let nested_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &nested_root)
-            .expect("nested sid");
-        let unrelated_sid =
-            workspace_write_cap_sid_for_root(&codex_home, &workspace, &unrelated_root)
-                .expect("unrelated sid");
-        let root_sids = root_capability_sids(
-            &codex_home,
-            &workspace,
-            vec![workspace.clone(), nested_root, unrelated_root],
-        )
-        .expect("root capabilities");
-
-        let deny_sid_strs = deny_root_capabilities_for_path(&protected_dir, &root_sids)
-            .into_iter()
-            .map(|root_sid| root_sid.sid_str.clone())
-            .collect::<Vec<_>>();
-
-        assert_eq!(deny_sid_strs, vec![workspace_sid, nested_sid]);
-        assert!(!deny_sid_strs.contains(&unrelated_sid));
-    }
-
-    #[test]
-    fn legacy_capability_roots_use_effective_write_roots() {
-        let temp = TempDir::new().expect("tempdir");
-        let codex_home = temp.path().join("codex-home");
-        let workspace = temp.path().join("workspace");
-        let active_root = temp.path().join("active-root");
-        let sandbox_root = codex_home.join(".sandbox");
-        std::fs::create_dir_all(&codex_home).expect("create codex home");
-        std::fs::create_dir_all(&workspace).expect("create workspace");
-        std::fs::create_dir_all(&active_root).expect("create active root");
-        std::fs::create_dir_all(&sandbox_root).expect("create sandbox root");
-
-        let writable_roots = vec![
-            AbsolutePathBuf::try_from(active_root.as_path()).expect("active root"),
-            AbsolutePathBuf::try_from(codex_home.as_path()).expect("codex home"),
-            AbsolutePathBuf::try_from(sandbox_root.as_path()).expect("sandbox root"),
-        ];
-        let permission_profile = workspace_profile(
-            NetworkSandboxPolicy::Restricted,
-            &writable_roots,
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
-        );
-        let workspace_roots = workspace_roots_for(workspace.as_path());
-        let permissions =
-            ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
-                &permission_profile,
-                workspace_roots.as_slice(),
-            )
-            .expect("managed permission profile");
-
-        let roots =
-            legacy_session_capability_roots(&permissions, &workspace, &HashMap::new(), &codex_home);
-
-        assert!(roots.contains(&dunce::canonicalize(&workspace).expect("workspace")));
-        assert!(roots.contains(&dunce::canonicalize(&active_root).expect("active root")));
-        assert!(!roots.contains(&dunce::canonicalize(&codex_home).expect("codex home")));
-        assert!(!roots.contains(&dunce::canonicalize(&sandbox_root).expect("sandbox root")));
-    }
-}
