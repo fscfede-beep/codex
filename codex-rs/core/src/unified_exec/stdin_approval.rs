@@ -19,6 +19,9 @@ use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxPermissions;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_shell_command::DangerousCommandPlatform;
+use codex_shell_command::is_destructive_interactive_input;
+use codex_utils_path_uri::PathConvention;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 
@@ -188,15 +191,11 @@ impl ProcessEntry {
         input: &str,
         strict_auto_review: bool,
     ) -> Result<Option<(ApprovalAction, String)>, UnifiedExecError> {
-        if input.is_empty()
-            || (!self.tty && input == "\u{3}")
-            || !context
-                .session
-                .features()
-                .enabled(Feature::WriteStdinApproval)
-        {
+        if input.is_empty() || (!self.tty && input == "\u{3}") {
             return Ok(None);
         }
+
+        let environment = context
         let environment = context
             .step_context
             .environments
@@ -207,6 +206,34 @@ impl ProcessEntry {
                     "cannot access the terminal's original environment; select it before retrying",
                 )
             })?;
+
+        let platform = match environment.executor_platform_os.as_deref() {
+            Some("windows") => DangerousCommandPlatform::Windows,
+            Some(_) => DangerousCommandPlatform::Posix,
+            None => match self.cwd.infer_path_convention() {
+                Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
+                _ => DangerousCommandPlatform::Posix,
+            },
+        };
+        let destructive_input = is_destructive_interactive_input(input, platform);
+        if destructive_input && !context.session.features().enabled(Feature::WriteStdinApproval) {
+            return Err(approval_error(
+                "destructive filesystem input is blocked because WriteStdinApproval is disabled",
+            ));
+        }
+        if destructive_input
+            && matches!(
+                context.step_context.settings.approval_policy(),
+                codex_protocol::protocol::AskForApproval::Never
+            )
+        {
+            return Err(approval_error(
+                "destructive filesystem input is blocked when approval policy is Never",
+            ));
+        }
+        if !context.session.features().enabled(Feature::WriteStdinApproval) {
+            return Ok(None);
+        }
         let permissions = &self.permissions;
         let current = TerminalPolicy::capture(
             environment,
@@ -220,7 +247,7 @@ impl ProcessEntry {
         let sandbox_permissions = permissions
             .review_requirement(&current, environment.permission_profile())
             .map_err(approval_error)?;
-        if sandbox_permissions == SandboxPermissions::UseDefault && !strict_auto_review {
+        if sandbox_permissions == SandboxPermissions::UseDefault && !strict_auto_review && !destructive_input {
             return Ok(None);
         }
         // Manual approvals shell-quote the input, which cannot preserve NUL bytes.
@@ -229,9 +256,13 @@ impl ProcessEntry {
                 "terminal input contains a NUL byte and cannot be reviewed safely",
             ));
         }
-        let reason = permissions
-            .approval_reason(sandbox_permissions)
-            .map_err(approval_error)?;
+        let reason = if destructive_input {
+            "Destructive filesystem input requires fresh human approval.".to_string()
+        } else {
+            permissions
+                .approval_reason(sandbox_permissions)
+                .map_err(approval_error)?
+        };
         let action = ApprovalAction::WriteStdin {
             id: self.call_id.clone(),
             approval_id: context.call_id.clone(),
