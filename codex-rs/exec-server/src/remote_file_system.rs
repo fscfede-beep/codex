@@ -283,6 +283,29 @@ impl RemoteFileSystem {
         Ok(())
     }
 
+    async fn remove_with_destructive_capability(
+        &self,
+        path: &PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<()> {
+        trace!("remote fs destructive remove");
+        let client = self.client.get().await.map_err(map_remote_error)?;
+        let result = client
+            .fs_remove(FsRemoveParams {
+                path: path.clone(),
+                recursive: Some(options.recursive),
+                force: Some(options.force),
+                follow_symlinks: (!options.follow_symlinks).then_some(false),
+                destructive_capability: true,
+                sandbox: sandbox.cloned(),
+            })
+            .await;
+        self.metadata_requests.lock().await.clear();
+        result.map_err(map_remote_error)?;
+        Ok(())
+    }
+
     async fn copy(
         &self,
         source_path: &PathUri,
@@ -388,6 +411,17 @@ impl ExecutorFileSystem for RemoteFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(RemoteFileSystem::remove(self, path, options, sandbox))
+    }
+
+    fn remove_with_destructive_capability<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(RemoteFileSystem::remove_with_destructive_capability(
+            self, path, options, sandbox,
+        ))
     }
 
     fn copy<'a>(
