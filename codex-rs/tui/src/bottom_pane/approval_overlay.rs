@@ -1015,10 +1015,7 @@ fn path_label(base: &str, subpath: &Option<LegacyAppPathString>) -> String {
     }
 }
 
-fn patch_options(
-    keymap: &ApprovalKeymap,
-    fresh_only: bool,
-) -> Vec<ApprovalOption> {
+fn patch_options(keymap: &ApprovalKeymap, fresh_only: bool) -> Vec<ApprovalOption> {
     let mut options = vec![
         ApprovalOption {
             label: "Yes, proceed".to_string(),
@@ -2556,5 +2553,4 @@ mod tests {
         );
         assert_eq!(normal.len(), 3);
     }
-
 }
