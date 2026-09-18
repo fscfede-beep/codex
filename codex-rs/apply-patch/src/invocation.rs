@@ -348,7 +348,10 @@ async fn capture_existing_destructive_target(
         })?;
     if metadata.is_symlink || !metadata.is_file || metadata.is_directory {
         return Err(ApplyPatchError::IoError(IoError {
-            context: format!("Unsafe destructive target {}", path.inferred_native_path_string()),
+            context: format!(
+                "Unsafe destructive target {}",
+                path.inferred_native_path_string()
+            ),
             source: std::io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "destructive apply_patch requires a regular non-symlink file target",
