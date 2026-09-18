@@ -95,6 +95,22 @@ pub fn apply_patch_file_update_mode_from_env() -> ApplyPatchFileUpdateMode {
     }
 }
 
+/// Returns true when a patch deletes a file or moves a file, both of which
+/// require destructive filesystem authorization at the runtime boundary.
+pub fn patch_contains_destructive_changes(patch: &str) -> Result<bool, ParseError> {
+    let source = parse_patch(patch)?;
+    Ok(source.hunks.iter().any(|hunk| {
+        matches!(
+            hunk,
+            Hunk::DeleteFile { .. }
+                | Hunk::UpdateFile {
+                    move_path: Some(_),
+                    ..
+                }
+        )
+    }))
+}
+
 #[derive(Debug, Error, PartialEq)]
 pub enum ApplyPatchError {
     #[error(transparent)]
