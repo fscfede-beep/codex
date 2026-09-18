@@ -268,7 +268,7 @@ pub(crate) fn destructive_patch_sandbox(
         )
         .into());
     };
-    if matches!(sandbox.permissions, PermissionProfile::External { .. }) {
+    if matches!(&sandbox.permissions, PermissionProfile::External { .. }) {
         return Err(ParseError::InvalidPatchError(
             "destructive apply_patch requires Codex-managed filesystem scope".to_string(),
         )
@@ -685,7 +685,10 @@ pub async fn apply_patch_with_destructive_targets(
 
         // This API is a hard execution boundary too: a caller cannot pass approved
         // destructive targets and then drop the scoped sandbox before mutation.
-        let scoped_sandbox = destructive_patch_sandbox(&hunks, cwd, sandbox)?;
+        let scoped_sandbox = match destructive_patch_sandbox(&hunks, cwd, sandbox) {
+            Ok(scoped_sandbox) => scoped_sandbox,
+            Err(error) => return Err(ApplyPatchFailure::without_delta(error)),
+        };
         let sandbox = scoped_sandbox.as_ref().or(sandbox);
         if sandbox.is_none() {
             return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
