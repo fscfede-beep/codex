@@ -32,6 +32,12 @@ That public material was consulted as a public engineering reference during reco
 
 Because the public requirements overlap materially, future technical records should attribute the overlapping public requirements to #42115 while keeping any independent implementation claims separate.
 
+## V21 current-main implementation
+
+V21 now contains an actual current-main source delta in the review branch, not only an artifact patch. It hardens `apply_patch` so AddFile/overwrite, DeleteFile, and Update+Move are classified as destructive; destructive patches require fresh user approval, cannot use cached/session approval, cannot be satisfied by permission preapproval or hooks/automatic review, require an enforced sandbox, and cannot retry unsandboxed after sandbox denial. The standalone arg0 apply_patch path rejects destructive patches because it has no approval UI.
+
+This V21 source delta is intentionally narrower than the full V4-V20 proposed safety chain: it is directly reviewable against upstream main, while earlier V-series artifacts remain historical proposal layers until independently merged/validated.
+
 ## Review package
 
 The detailed patch files, reports, harnesses, ledgers, and bundles are preserved in the associated local evidence store under /mnt/data/openai_p0_remediation_v3/.
