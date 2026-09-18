@@ -56,6 +56,18 @@ pub fn assess_patch_safety(
             policy,
             AskForApproval::Granular(granular_config) if !granular_config.sandbox_approval
         );
+
+    // DeleteFile and UpdateFile+Move are destructive effects. They must never
+    // be auto-approved merely because the active policy has broad write access.
+    if action.has_destructive_changes() {
+        if rejects_sandbox_approval {
+            return SafetyCheck::Reject {
+                reason: "destructive patch changes require fresh user approval".to_string(),
+            };
+        }
+        return SafetyCheck::AskUser;
+    }
+
     let sandbox_available = match sandbox_route {
         PatchSandboxRoute::ExecutorManaged => true,
         PatchSandboxRoute::Platform(windows_sandbox_level) => {
