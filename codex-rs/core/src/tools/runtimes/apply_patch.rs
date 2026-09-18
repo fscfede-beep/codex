@@ -211,12 +211,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
                 update_file_mode: req.action.update_file_mode(),
                 // Only reject links when an otherwise-required sandbox was bypassed.
                 // Executor-managed sandboxes can have SandboxType::None.
-                follow_symlinks: attempt.sandbox_requested
-                    || !attempt.manager.should_sandbox(
-                        attempt.permissions,
-                        self.sandbox_preference(),
-                        attempt.enforce_managed_network,
-                    ),
+                    follow_symlinks: false,
             },
             &req.action.cwd,
             &mut stdout,
