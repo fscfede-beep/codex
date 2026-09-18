@@ -9,10 +9,7 @@ on:
       - p0/v24-cumulative-destructive-gate
   pull_request:
     branches:
-      - p0/v21-reconciled-review
-      - p0/v22-destructive-scope-gate
-      - p0/v23-destructive-object-identity
-      - p0/v24-cumulative-destructive-gate
+      - p0/upstream-main-20260918
 
 permissions:
   contents: read
