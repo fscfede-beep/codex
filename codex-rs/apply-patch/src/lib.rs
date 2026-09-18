@@ -15,8 +15,8 @@ use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
-use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::FileSystemObjectIdentity;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
@@ -256,7 +256,9 @@ pub(crate) fn destructive_patch_sandbox(
                 targets.push(hunk.resolve_path(cwd)?);
                 targets.push(cwd.join(&move_path.to_string_lossy())?);
             }
-            Hunk::UpdateFile { move_path: None, .. } => {}
+            Hunk::UpdateFile {
+                move_path: None, ..
+            } => {}
         }
     }
     if targets.is_empty() {
@@ -309,12 +311,15 @@ fn destructive_target_for_path<'a>(
     targets: &'a [DestructivePatchTarget],
     path: &PathUri,
 ) -> anyhow::Result<&'a DestructivePatchTarget> {
-    targets.iter().find(|target| target.path() == path).ok_or_else(|| {
-        anyhow::anyhow!(
-            "destructive apply_patch target was not present in the verified target set: {}",
-            path.inferred_native_path_string()
-        )
-    })
+    targets
+        .iter()
+        .find(|target| target.path() == path)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "destructive apply_patch target was not present in the verified target set: {}",
+                path.inferred_native_path_string()
+            )
+        })
 }
 
 async fn revalidate_destructive_target(
