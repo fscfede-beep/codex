@@ -626,12 +626,6 @@ async fn apply_hunks_to_files(
     if hunks.is_empty() {
         anyhow::bail!("No files were modified.");
     }
-    if hunks.iter().any(hunk_is_destructive) && destructive_targets.is_empty() {
-        anyhow::bail!(
-            "destructive apply_patch requires preflight object-identity authorization"
-        );
-    }
-
     let mut added: Vec<PathBuf> = Vec::new();
     let mut modified: Vec<PathBuf> = Vec::new();
     let mut deleted: Vec<PathBuf> = Vec::new();
@@ -936,7 +930,7 @@ async fn revalidate_destructive_target(
                 );
             }
         }
-        DestructivePatchTargetState::MissingParent(expected_parent) => {
+        DestructivePatchTargetState::MissingParent { parent, identity } => {
             match fs
                 .get_metadata(
                     target.path(),
@@ -952,11 +946,8 @@ async fn revalidate_destructive_target(
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let parent = target.path().parent().ok_or_else(|| {
-                anyhow::anyhow!("destructive target has no parent")
-            })?;
             let parent_metadata = fs
-                .get_metadata(&parent, GetMetadataOptions { follow_symlinks: false }, sandbox)
+                .get_metadata(parent, GetMetadataOptions { follow_symlinks: false }, sandbox)
                 .await?;
             if parent_metadata.is_symlink || !parent_metadata.is_directory {
                 anyhow::bail!("destructive parent changed type: {}", parent.inferred_native_path_string());
@@ -968,7 +959,7 @@ async fn revalidate_destructive_target(
                     "executor cannot prove parent identity for {}",
                     parent.inferred_native_path_string()
                 ))?;
-            if &actual_parent != expected_parent {
+            if &actual_parent != identity {
                 anyhow::bail!("destructive parent identity changed: {}", parent.inferred_native_path_string());
             }
         }
