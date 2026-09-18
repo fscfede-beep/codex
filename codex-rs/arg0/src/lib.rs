@@ -131,13 +131,14 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                     Ok(runtime) => runtime,
                     Err(_) => std::process::exit(1),
                 };
-                let destructive = match codex_apply_patch::patch_contains_destructive_changes(&patch_arg) {
-                    Ok(destructive) => destructive,
-                    Err(err) => {
-                        eprintln!("Error: invalid apply_patch payload: {err}");
-                        1
-                    }
-                };
+                let destructive =
+                    match codex_apply_patch::patch_contains_destructive_changes(&patch_arg) {
+                        Ok(destructive) => destructive,
+                        Err(err) => {
+                            eprintln!("Error: invalid apply_patch payload: {err}");
+                            1
+                        }
+                    };
                 if destructive {
                     eprintln!(
                         "Error: destructive apply_patch requires the governed runtime; standalone execution is disabled."
