@@ -380,9 +380,15 @@ fn destructive_patch_execution_disables_symlink_following() {
     let path =
         PathUri::from_host_native_path(std::env::temp_dir().join("destructive-no-follow.txt"))
             .expect("temp path URI");
-    let action = ApplyPatchAction::new_add_for_test(&path, "replacement".to_string());
-    let runtime = ApplyPatchRuntime::new_for_action(&action);
+    let destructive_action =
+        ApplyPatchAction::new_add_for_test(&path, "replacement".to_string());
+    let destructive_runtime = ApplyPatchRuntime::new_for_action(&destructive_action);
 
-    assert!(action.is_destructive());
-    assert!(!runtime.destructive);
+    assert!(destructive_action.is_destructive());
+    assert!(!destructive_runtime.apply_options(&destructive_action).follow_symlinks);
+
+    let normal_runtime = ApplyPatchRuntime::new();
+    assert!(normal_runtime
+        .apply_options(&destructive_action)
+        .follow_symlinks);
 }
