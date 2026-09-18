@@ -367,3 +367,13 @@ mod tests {
 
         let home = tempdir()?;
         let managed_root = home.path().join("attachments");
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&managed_root)?;
+        std::fs::create_dir_all(&outside)?;
+        symlink(&outside, managed_root.join("escape"))?;
+
+        let target = managed_root.join("escape").join("secret.txt");
+        assert!(validate_managed_storage_path(&target, &managed_root).is_err());
+        Ok(())
+    }
+}
