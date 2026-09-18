@@ -456,6 +456,7 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
         approval_sandbox_permissions: SandboxPermissions::UseDefault,
         prompt_permissions: Some(requested_permissions),
         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+        allow_unsandboxed_escalation: true,
     };
 
     let action = codex_shell_escalation::EscalationPolicy::determine_action(
@@ -624,6 +625,7 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
         approval_sandbox_permissions: SandboxPermissions::RequireEscalated,
         prompt_permissions: None,
         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+        allow_unsandboxed_escalation: true,
     };
 
     let action = tokio::time::timeout(
@@ -835,6 +837,7 @@ prefix_rule(pattern = ["{cat_path_literal}"], decision = "allow")
         approval_sandbox_permissions: SandboxPermissions::UseDefault,
         prompt_permissions: None,
         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+        allow_unsandboxed_escalation: true,
     };
 
     let action = codex_shell_escalation::EscalationPolicy::determine_action(
@@ -878,6 +881,7 @@ async fn denied_reads_keep_granular_sandbox_rejection_for_escalation() -> anyhow
         approval_sandbox_permissions: SandboxPermissions::RequireEscalated,
         prompt_permissions: None,
         stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+        allow_unsandboxed_escalation: true,
     };
 
     let action = codex_shell_escalation::EscalationPolicy::determine_action(
