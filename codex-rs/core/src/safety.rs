@@ -70,9 +70,7 @@ pub fn assess_patch_safety(
                 reason: "destructive apply_patch requires an approval-capable sandbox".to_string(),
             };
         }
-        if !sandbox_available
-            && !matches!(permission_profile, PermissionProfile::Disabled | PermissionProfile::External { .. })
-        {
+        if !sandbox_available {
             return SafetyCheck::Reject {
                 reason: "destructive apply_patch requires an enforceable filesystem sandbox"
                     .to_string(),
