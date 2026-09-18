@@ -296,6 +296,31 @@ impl SandboxedFileSystem {
         Ok(())
     }
 
+    async fn remove_with_destructive_capability(
+        &self,
+        path: &PathUri,
+        remove_options: RemoveOptions,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<()> {
+        let sandbox = require_platform_sandbox(sandbox)?;
+        validate_native_path(path)?;
+        self.run_sandboxed(
+            sandbox,
+            FsHelperRequest::Remove(FsRemoveParams {
+                path: path.clone(),
+                recursive: Some(remove_options.recursive),
+                force: Some(remove_options.force),
+                follow_symlinks: (!remove_options.follow_symlinks).then_some(false),
+                destructive_capability: true,
+                sandbox: None,
+            }),
+        )
+        .await?
+        .expect_remove()
+        .map_err(map_sandbox_error)?;
+        Ok(())
+    }
+
     async fn copy(
         &self,
         source_path: &PathUri,
@@ -412,6 +437,20 @@ impl ExecutorFileSystem for SandboxedFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(SandboxedFileSystem::remove(
+            self,
+            path,
+            remove_options,
+            sandbox,
+        ))
+    }
+
+    fn remove_with_destructive_capability<'a>(
+        &'a self,
+        path: &'a PathUri,
+        remove_options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        Box::pin(SandboxedFileSystem::remove_with_destructive_capability(
             self,
             path,
             remove_options,
