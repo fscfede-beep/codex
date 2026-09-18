@@ -133,6 +133,27 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
                 };
                 let cwd = cwd.into();
                 let update_file_mode = codex_apply_patch::apply_patch_file_update_mode_from_env();
+                let destructive = codex_apply_patch::parse_patch(&patch_arg)
+                    .map(|parsed| {
+                        parsed.hunks.iter().any(|hunk| {
+                            matches!(
+                                hunk,
+                                codex_apply_patch::Hunk::AddFile { .. }
+                                    | codex_apply_patch::Hunk::DeleteFile { .. }
+                                    | codex_apply_patch::Hunk::UpdateFile {
+                                        move_path: Some(_),
+                                        ..
+                                    }
+                            )
+                        })
+                    })
+                    .unwrap_or(true);
+                if destructive {
+                    eprintln!(
+                        "Error: destructive apply_patch execution requires the main Codex approval and sandbox path."
+                    );
+                    return 1;
+                }
                 match runtime.block_on(codex_apply_patch::apply_patch_with_options(
                     &patch_arg,
                     codex_apply_patch::ApplyPatchOptions {
