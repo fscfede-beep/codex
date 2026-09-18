@@ -362,6 +362,22 @@ pub(crate) enum ToolError {
 }
 
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
+    /// Force an OS-level filesystem safety fence even when ambient policy would
+    /// otherwise permit a direct/unsandboxed process launch.
+    fn requires_filesystem_safety_fence(&self, _req: &Req) -> bool {
+        false
+    }
+
+    /// Ephemeral delete capability. A runtime must return true only after the
+    /// orchestrator has completed a valid approval path for a destructive action.
+    fn allow_destructive_filesystem_effects(
+        &self,
+        _req: &Req,
+        _already_approved: bool,
+    ) -> bool {
+        false
+    }
+
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
@@ -522,7 +538,7 @@ impl<'a> SandboxAttempt<'a> {
         );
         let request = self
             .manager
-            .transform(SandboxTransformRequest {
+            .transform_with_destructive_filesystem_effects(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
                 // The exec-server must receive the native command, not this host's wrapper.
@@ -535,7 +551,9 @@ impl<'a> SandboxAttempt<'a> {
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
-            })
+            },
+            self.allow_destructive_filesystem_effects,
+        )
             .map_err(CodexErr::from)?;
         let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(
             request,
