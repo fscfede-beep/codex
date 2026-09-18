@@ -277,3 +277,38 @@ fn map_fs_error(err: io::Error) -> JSONRPCErrorError {
         internal_error(err.to_string())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn managed_storage_allows_only_codex_attachments() -> io::Result<()> {
+        let home = tempdir()?;
+        let managed_root = home.path().join("attachments");
+        std::fs::create_dir_all(&managed_root)?;
+        let inside = managed_root.join("id").join("file.txt");
+        let outside = home.path().join("project").join("file.txt");
+
+        assert!(validate_managed_storage_path(&inside, &managed_root).is_ok());
+        assert!(validate_managed_storage_path(&outside, &managed_root).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_storage_rejects_symlink_escape() -> io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let home = tempdir()?;
+        let managed_root = home.path().join("attachments");
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&managed_root)?;
+        std::fs::create_dir_all(&outside)?;
+        symlink(&outside, managed_root.join("escape"))?;
+
+        let target = managed_root.join("escape").join("secret.txt");
+        assert!(validate_managed_storage_path(&target, &managed_root).is_err());
+        Ok(())
+    }
+}
