@@ -79,6 +79,7 @@ pub use codex_file_system::ExecutorFileSystemFuture;
 pub use codex_file_system::FILE_READ_CHUNK_SIZE;
 pub use codex_file_system::FileMetadata;
 pub use codex_file_system::FileSystemEnvironmentAccessor;
+pub use codex_file_system::FileSystemObjectIdentity;
 pub use codex_file_system::FileSystemReadStream;
 pub use codex_file_system::FileSystemResult;
 pub use codex_file_system::FileSystemSandboxContext;

@@ -2991,6 +2991,17 @@ impl Session {
             warn!("Overwriting existing pending approval for call_id: {approval_id}");
         }
 
+        let fresh_only = changes.values().any(|change| {
+            matches!(
+                change,
+                FileChange::Add { .. }
+                    | FileChange::Delete { .. }
+                    | FileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        });
         let event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
             call_id,
             turn_id: turn_context.sub_id.clone(),
@@ -3000,7 +3011,12 @@ impl Session {
             grant_root,
         });
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        let decision = rx_approve.await.unwrap_or(ReviewDecision::Abort);
+        if fresh_only && matches!(decision, ReviewDecision::ApprovedForSession) {
+            ReviewDecision::Approved
+        } else {
+            decision
+        }
     }
 
     #[expect(

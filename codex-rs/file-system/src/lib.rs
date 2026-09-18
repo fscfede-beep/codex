@@ -39,6 +39,21 @@ use std::task::Poll;
 
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Opaque identity of a concrete filesystem object on the selected executor.
+///
+/// Destructive operations may use this value to detect replacement of the
+/// approved object between authorization and execution. Backends that cannot
+/// prove object identity must return None; callers must fail closed for
+/// destructive effects rather than substituting path-only authorization.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct FileSystemObjectIdentity(String);
+
+impl FileSystemObjectIdentity {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
 /// Maximum accepted directory depth for a filesystem walk.
 pub const MAX_WALK_DEPTH: usize = 64;
 /// Maximum accepted directory count, including the walk root.
@@ -688,6 +703,21 @@ pub trait ExecutorFileSystem: Send + Sync {
         options: GetMetadataOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata>;
+
+    /// Returns a stable identity for the concrete object at path.
+    ///
+    /// Implementations must return None when the platform/backend cannot
+    /// provide an identity that is safe to use for destructive revalidation.
+    fn get_object_identity<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Option<FileSystemObjectIdentity>> {
+        Box::pin(async move {
+            let _ = (path, sandbox);
+            Ok(None)
+        })
+    }
 
     fn read_directory<'a>(
         &'a self,
