@@ -167,34 +167,7 @@ pub(crate) enum ApprovalCacheKey {
 
 impl ApprovalAction {
     fn requires_fresh_human_approval(&self) -> bool {
-    fn is_destructive_filesystem_action(&self) -> bool {
-        match self {
-            Self::ExecCommand { command, cwd, .. } => {
-                let platform = match cwd.infer_path_convention() {
-                    Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
-                    _ => DangerousCommandPlatform::Posix,
-                };
-                match platform {
-                    DangerousCommandPlatform::Posix => is_destructive_delete_command(command),
-                    DangerousCommandPlatform::Windows => {
-                        is_destructive_delete_command(command)
-                    }
-                }
-            }
-            Self::WriteStdin { input, cwd, .. } => {
-                let platform = match cwd.infer_path_convention() {
-                    Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
-                    _ => DangerousCommandPlatform::Posix,
-                };
-                is_destructive_interactive_input(input, platform)
-            }
-            #[cfg(unix)]
-            Self::Execve { command, .. } => is_destructive_delete_command(command),
-            Self::ApplyPatch { .. } => self.requires_fresh_human_approval(),
-            _ => false,
-        }
-    }
-
+    fn requires_fresh_human_approval(&self) -> bool {
         matches!(
             self,
             Self::ApplyPatch { changes, .. }
@@ -212,7 +185,25 @@ impl ApprovalAction {
         )
     }
 
-    pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
+
+    fn is_destructive_filesystem_action(&self) -> bool {
+        match self {
+            Self::ExecCommand { command, .. } => is_destructive_delete_command(command),
+            Self::WriteStdin { input, cwd, .. } => {
+                let platform = match cwd.infer_path_convention() {
+                    Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
+                    _ => DangerousCommandPlatform::Posix,
+                };
+                is_destructive_interactive_input(input, platform)
+            }
+            #[cfg(unix)]
+            Self::Execve { command, .. } => is_destructive_delete_command(command),
+            Self::ApplyPatch { .. } => self.requires_fresh_human_approval(),
+            _ => false,
+        }
+    }
+
+}    pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
             Self::ExecCommand {
                 hook_command,
