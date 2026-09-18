@@ -38,6 +38,9 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
+use codex_shell_command::DangerousCommandPlatform;
+use codex_shell_command::is_destructive_delete_command;
+use codex_shell_command::is_destructive_interactive_input;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_tools::ToolName;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -164,6 +167,34 @@ pub(crate) enum ApprovalCacheKey {
 
 impl ApprovalAction {
     fn requires_fresh_human_approval(&self) -> bool {
+    fn is_destructive_filesystem_action(&self) -> bool {
+        match self {
+            Self::ExecCommand { command, cwd, .. } => {
+                let platform = match cwd.infer_path_convention() {
+                    Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
+                    _ => DangerousCommandPlatform::Posix,
+                };
+                match platform {
+                    DangerousCommandPlatform::Posix => is_destructive_delete_command(command),
+                    DangerousCommandPlatform::Windows => {
+                        is_destructive_delete_command(command)
+                    }
+                }
+            }
+            Self::WriteStdin { input, cwd, .. } => {
+                let platform = match cwd.infer_path_convention() {
+                    Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
+                    _ => DangerousCommandPlatform::Posix,
+                };
+                is_destructive_interactive_input(input, platform)
+            }
+            #[cfg(unix)]
+            Self::Execve { command, .. } => is_destructive_delete_command(command),
+            Self::ApplyPatch { .. } => self.requires_fresh_human_approval(),
+            _ => false,
+        }
+    }
+
         matches!(
             self,
             Self::ApplyPatch { changes, .. }
@@ -493,6 +524,14 @@ impl Session {
         // Stdin that exceeds current permissions needs a fresh sandbox approval.
         // Strict review of ordinary input follows the same routing as ordinary exec.
         let policy = ctx.review_context.turn().approval_policy();
+        if action.is_destructive_filesystem_action() {
+            let resolution = ApprovalResolution {
+                decision: self.request_user_approval(&action, &ctx).await,
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
         if matches!(&action, ApprovalAction::WriteStdin { sandbox_permissions, .. }
             if sandbox_permissions.requests_sandbox_override())
             && !(ctx.strict_auto_review && matches!(policy, AskForApproval::Never))
