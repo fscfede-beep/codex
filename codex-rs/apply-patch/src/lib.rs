@@ -468,6 +468,103 @@ pub async fn apply_patch_with_options(
     apply_hunks_with_options(&hunks, options, cwd, stdout, stderr, fs, sandbox).await
 }
 
+/// Executes a previously verified patch with destructive object-identity preconditions.
+pub async fn apply_patch_with_destructive_targets(
+    patch: &str,
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let hunks = match parse_patch(patch) {
+        Ok(source) => source.hunks,
+        Err(e) => {
+            match &e {
+                InvalidPatchError(message) => {
+                    writeln!(stderr, "Invalid patch: {message}")
+                        .map_err(ApplyPatchError::from)
+                        .map_err(ApplyPatchFailure::without_delta)?;
+                }
+                InvalidHunkError { message, line_number } => {
+                    writeln!(stderr, "Invalid patch hunk on line {line_number}: {message}")
+                        .map_err(ApplyPatchError::from)
+                        .map_err(ApplyPatchFailure::without_delta)?;
+                }
+            }
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::ParseError(e)));
+        }
+    };
+    if hunks.iter().any(hunk_is_destructive) && destructive_targets.is_empty() {
+        return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+            context: "destructive apply_patch authorization".to_string(),
+            source: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive apply_patch requires verified object-identity preconditions",
+            ),
+        })));
+    }
+    apply_hunks_with_options_and_destructive_targets(
+        &hunks,
+        options,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+        destructive_targets,
+    )
+    .await
+}
+
+async fn apply_hunks_with_options_and_destructive_targets(
+    hunks: &[Hunk],
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let mut delta = AppliedPatchDelta::empty();
+    match apply_hunks_to_files(
+        hunks,
+        options,
+        cwd,
+        fs,
+        sandbox,
+        destructive_targets,
+        &mut delta,
+    )
+    .await
+    {
+        Ok(affected_paths) => {
+            print_summary(&affected_paths, stdout).map_err(|error| {
+                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
+            })?;
+            Ok(delta)
+        }
+        Err(error) => {
+            let msg = error.to_string();
+            writeln!(stderr, "{msg}").map_err(|error| {
+                ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
+            })?;
+            let error = if let Some(io) = error.downcast_ref::<std::io::Error>() {
+                ApplyPatchError::from(io)
+            } else {
+                ApplyPatchError::IoError(IoError {
+                    context: msg,
+                    source: std::io::Error::other(error),
+                })
+            };
+            Err(ApplyPatchFailure::new(error, delta))
+        }
+    }
+}
+
 /// Applies hunks and continues to update stdout/stderr
 pub async fn apply_hunks(
     hunks: &[Hunk],
@@ -544,6 +641,7 @@ async fn apply_hunks_to_files(
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
+    destructive_targets: &[DestructivePatchTarget],
     delta: &mut AppliedPatchDelta,
 ) -> anyhow::Result<AffectedPaths> {
     let ApplyPatchOptions {
@@ -577,6 +675,8 @@ async fn apply_hunks_to_files(
         let path_uri = hunk.resolve_path(cwd)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
+                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 let overwritten_content = read_optional_file_text_for_delta(
                     &path_uri,
                     fs,
@@ -605,6 +705,8 @@ async fn apply_hunks_to_files(
                 added.push(affected_path);
             }
             Hunk::DeleteFile { .. } => {
+                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                revalidate_destructive_target(target, fs, sandbox).await?;
                 note_existing_path_delta_support(
                     &path_uri,
                     fs,
@@ -689,6 +791,8 @@ async fn apply_hunks_to_files(
                 .await?;
                 if let Some(dest) = move_path {
                     let dest_uri = cwd.join(&dest.to_string_lossy())?;
+                    let dest_target = destructive_target_for_path(destructive_targets, &dest_uri)?;
+                    revalidate_destructive_target(dest_target, fs, sandbox).await?;
                     let overwritten_move_content = read_optional_file_text_for_delta(
                         &dest_uri,
                         fs,
@@ -708,6 +812,8 @@ async fn apply_hunks_to_files(
                         .await
                     );
                     let dest_write_change_index = delta.changes.len();
+                    let source_target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                    revalidate_destructive_target(source_target, fs, sandbox).await?;
                     delta.changes.push(AppliedPatchChange {
                         path: dest_uri.clone(),
                         change: AppliedPatchFileChange::Add {
