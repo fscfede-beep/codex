@@ -118,11 +118,10 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
 async fn user_shell_command_cannot_delete_outside_workspace_root() -> anyhow::Result<()> {
     let workspace = TempDir::new()?;
     let workspace_cwd = workspace.path().to_path_buf();
-    let outside = workspace
-        .path()
-        .parent()
-        .unwrap()
-        .join(format!("rumbo_p0_user_shell_delete_probe_{}.txt", std::process::id()));
+    let outside = workspace.path().parent().unwrap().join(format!(
+        "rumbo_p0_user_shell_delete_probe_{}.txt",
+        std::process::id()
+    ));
     tokio::fs::write(&outside, "protected").await?;
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(move |config| {
@@ -161,7 +160,10 @@ async fn user_shell_command_cannot_delete_outside_workspace_root() -> anyhow::Re
     })
     .await;
 
-    assert_ne!(end.exit_code, 0, "outside delete unexpectedly succeeded: {end:?}");
+    assert_ne!(
+        end.exit_code, 0,
+        "outside delete unexpectedly succeeded: {end:?}"
+    );
     assert!(
         outside.exists(),
         "user shell deleted outside workspace root: {}",
