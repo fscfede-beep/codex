@@ -1,6 +1,8 @@
 use super::*;
 use codex_core::exec_env::inject_apply_patch_env;
 use codex_core::windows_sandbox::managed_proxy_routing_for_windows_sandbox;
+use codex_protocol::models::ManagedFileSystemPermissions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::shell_environment::is_non_inheritable_env_var;
 
 #[derive(Clone)]
@@ -259,6 +261,11 @@ impl CommandExecRequestProcessor {
                 self.config.effective_workspace_roots(),
             )
         };
+        let effective_permission_profile = govern_command_exec_profile(
+            effective_permission_profile,
+            &windows_sandbox_workspace_roots,
+        )?;
+
         let started_network_proxy = match network_proxy_spec.as_ref() {
             Some(spec) => match spec
                 .start_proxy(
@@ -339,4 +346,34 @@ impl CommandExecRequestProcessor {
             })
             .await
     }
+fn govern_command_exec_profile(
+    profile: PermissionProfile,
+    workspace_roots: &[codex_utils_path_uri::PathUri],
+) -> Result<PermissionProfile, JSONRPCErrorError> {
+    let network = profile.network_sandbox_policy();
+    match profile {
+        PermissionProfile::External { .. } => Err(invalid_request(
+            "command/exec requires Codex-managed filesystem sandbox; external sandbox authority is not accepted",
+        )),
+        PermissionProfile::Disabled
+        | PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Unrestricted,
+            ..
+        } => {
+            if workspace_roots.is_empty() {
+                return Err(invalid_request(
+                    "command/exec requires at least one workspace root when narrowing full filesystem access",
+                ));
+            }
+            Ok(PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                network,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ))
+        }
+        PermissionProfile::Managed { .. } => Ok(profile),
+    }
+}
+
 }
