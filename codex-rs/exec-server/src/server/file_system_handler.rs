@@ -297,11 +297,26 @@ impl FileSystemHandler {
 
     pub(crate) async fn remove(
         &self,
-        _params: FsRemoveParams,
+        params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        Err(invalid_request(
-            "fs/remove is disabled at the RPC boundary: destructive filesystem deletion requires the governed approval and sandbox path",
-        ))
+        let sandbox = params.sandbox.as_ref().ok_or_else(|| {
+            invalid_request(
+                "fs/remove requires an explicit scoped filesystem sandbox; unscoped deletion is disabled",
+            )
+        })?;
+        self.file_system
+            .remove(
+                &params.path,
+                RemoveOptions {
+                    recursive: params.recursive.unwrap_or(true),
+                    force: params.force.unwrap_or(true),
+                    follow_symlinks: params.follow_symlinks.unwrap_or(true),
+                },
+                Some(sandbox),
+            )
+            .await
+            .map_err(map_fs_error)?;
+        Ok(FsRemoveResponse {})
     }
 
     pub(crate) async fn copy(
