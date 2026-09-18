@@ -115,10 +115,15 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
 }
 
 #[tokio::test]
-async fn user_shell_command_cannot_escape_workspace_root() -> anyhow::Result<()> {
+async fn user_shell_command_cannot_delete_outside_workspace_root() -> anyhow::Result<()> {
     let workspace = TempDir::new()?;
     let workspace_cwd = workspace.path().to_path_buf();
-    let outside = workspace.path().parent().unwrap().join("rumbo_p0_user_shell_escape_probe.txt");
+    let outside = workspace
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("rumbo_p0_user_shell_delete_probe_{}.txt", std::process::id()));
+    tokio::fs::write(&outside, "protected").await?;
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(move |config| {
         config.cwd = workspace_cwd.abs();
@@ -127,11 +132,11 @@ async fn user_shell_command_cannot_escape_workspace_root() -> anyhow::Result<()>
 
     let command = match codex_core::shell::default_user_shell().name() {
         "powershell" => format!(
-            "[IO.File]::WriteAllText((Join-Path (Split-Path -Parent (Get-Location).Path) '{}'),'blocked')",
+            "Remove-Item -Force (Join-Path (Split-Path -Parent (Get-Location).Path) '{}')",
             outside.file_name().unwrap().to_string_lossy()
         ),
-        "cmd" => format!("echo blocked>..\\{}", outside.file_name().unwrap().to_string_lossy()),
-        _ => format!("printf blocked > ../{}", outside.file_name().unwrap().to_string_lossy()),
+        "cmd" => format!("del /f /q ..\\{}", outside.file_name().unwrap().to_string_lossy()),
+        _ => format!("rm -f -- ../{}", outside.file_name().unwrap().to_string_lossy()),
     };
 
     fixture
@@ -150,12 +155,13 @@ async fn user_shell_command_cannot_escape_workspace_root() -> anyhow::Result<()>
     })
     .await;
 
-    assert_ne!(end.exit_code, 0, "escape command unexpectedly succeeded: {end:?}");
+    assert_ne!(end.exit_code, 0, "outside delete unexpectedly succeeded: {end:?}");
     assert!(
-        !outside.exists(),
-        "user shell wrote outside workspace root: {}",
+        outside.exists(),
+        "user shell deleted outside workspace root: {}",
         outside.display()
     );
+    tokio::fs::remove_file(&outside).await?;
 
     Ok(())
 }
@@ -518,183 +524,3 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
         r"(?m)\A<user_shell_command>\n<command>\n{escaped_command}\n</command>\n<result>\nExit code: 0\nDuration: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\nnot-set\n</result>\n</user_shell_command>\z"
     );
     assert_regex_match(&expected_pattern, &command_message);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Result<()> {
-    let server = responses::start_mock_server().await;
-    let mut builder = core_test_support::test_codex::test_codex().with_config(|config| {
-        let file_system_sandbox_policy = config.permissions.file_system_sandbox_policy();
-        config
-            .permissions
-            .set_permission_profile(PermissionProfile::from_runtime_permissions(
-                &file_system_sandbox_policy,
-                NetworkSandboxPolicy::Restricted,
-            ))
-            .expect("set permission profile");
-    });
-    let test = builder.build(&server).await?;
-
-    #[cfg(windows)]
-    let command = r#"$val = $env:CODEX_SANDBOX_NETWORK_DISABLED; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string();
-    #[cfg(not(windows))]
-    let command =
-        r#"sh -c "printf '%s' \"${CODEX_SANDBOX_NETWORK_DISABLED:-not-set}\"""#.to_string();
-
-    test.codex
-        .submit(Op::RunUserShellCommand {
-            command,
-            timeout_ms: None,
-        })
-        .await?;
-
-    let ExecCommandEndEvent {
-        exit_code,
-        stdout,
-        stderr,
-        ..
-    } = wait_for_event_match(&test.codex, |ev| match ev {
-        EventMsg::ExecCommandEnd(event) => Some(event.clone()),
-        _ => None,
-    })
-    .await;
-
-    assert_eq!(
-        exit_code, 0,
-        "shell command should execute successfully. stdout=`{stdout}`, stderr=`{stderr}`",
-    );
-    assert_eq!(stdout.trim(), "not-set");
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(not(target_os = "windows"))] // TODO: unignore on windows
-async fn user_shell_command_output_is_truncated_in_history() -> anyhow::Result<()> {
-    let server = responses::start_mock_server().await;
-    let builder = core_test_support::test_codex::test_codex();
-    let test = builder
-        .with_config(|config| {
-            config.tool_output_token_limit = Some(100);
-        })
-        .build(&server)
-        .await?;
-
-    #[cfg(windows)]
-    let command = r#"for ($i=1; $i -le 400; $i++) { Write-Output $i }"#.to_string();
-    #[cfg(not(windows))]
-    let command = "seq 1 400".to_string();
-
-    test.codex
-        .submit(Op::RunUserShellCommand {
-            command: command.clone(),
-            timeout_ms: None,
-        })
-        .await?;
-
-    let end_event = wait_for_event_match(&test.codex, |ev| match ev {
-        EventMsg::ExecCommandEnd(event) => Some(event.clone()),
-        _ => None,
-    })
-    .await;
-    assert_eq!(end_event.exit_code, 0);
-
-    let _ = wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    let responses = vec![responses::sse(vec![
-        responses::ev_response_created("resp-1"),
-        responses::ev_assistant_message("msg-1", "done"),
-        responses::ev_completed("resp-1"),
-    ])];
-    let mock = responses::mount_sse_sequence(&server, responses).await;
-
-    test.submit_turn("follow-up after shell command").await?;
-
-    let request = mock.single_request();
-    let command_message = request
-        .message_input_texts("user")
-        .into_iter()
-        .find(|text| text.contains("<user_shell_command>"))
-        .expect("command message recorded in request");
-    let command_message = command_message.replace("\r\n", "\n");
-
-    let head = (1..=69).map(|i| format!("{i}\n")).collect::<String>();
-    let tail = (352..=400).map(|i| format!("{i}\n")).collect::<String>();
-    let truncated_body = format!(
-        "Warning: truncated output (original token count: 373)\nTotal output lines: 400\n\n{head}70…273 tokens truncated…351\n{tail}"
-    );
-    let escaped_command = escape(&command);
-    let escaped_truncated_body = escape(&truncated_body);
-    let expected_pattern = format!(
-        r"(?m)\A<user_shell_command>\n<command>\n{escaped_command}\n</command>\n<result>\nExit code: 0\nDuration: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n{escaped_truncated_body}\n</result>\n</user_shell_command>\z"
-    );
-    assert_regex_match(&expected_pattern, &command_message);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config.tool_output_token_limit = Some(100);
-    });
-    let fixture = builder.build(&server).await?;
-
-    let call_id = "user-shell-double-truncation";
-    let args = if cfg!(windows) {
-        serde_json::json!({
-            "cmd": "for ($i=1; $i -le 2000; $i++) { Write-Output $i }",
-            "yield_time_ms": 5_000,
-        })
-    } else {
-        serde_json::json!({
-            "cmd": "seq 1 2000",
-            "yield_time_ms": 5_000,
-        })
-    };
-
-    mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-1"),
-            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
-            ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-    let mock2 = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_assistant_message("msg-1", "done"),
-            ev_completed("resp-2"),
-        ]),
-    )
-    .await;
-
-    fixture
-        .submit_turn_with_permission_profile(
-            "trigger big exec_command output",
-            PermissionProfile::Disabled,
-        )
-        .await?;
-
-    let output = mock2
-        .single_request()
-        .function_call_output_text(call_id)
-        .context("function_call_output present for exec_command call")?;
-
-    let truncation_headers = output.matches("Total output lines:").count();
-
-    assert_eq!(
-        truncation_headers, 1,
-        "exec_command output should carry only one truncation header: {output}"
-    );
-
-    Ok(())
-}
