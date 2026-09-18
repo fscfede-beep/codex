@@ -75,21 +75,7 @@ impl FsRequestProcessor {
         validate_managed_storage_path(path.as_path(), &self.managed_storage_root)
     }
     fn managed_storage_sandbox(&self) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
-        let root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
-            &self.managed_storage_root,
-        )
-        .map_err(|err| invalid_request(format!("invalid CODEX_HOME attachments root: {err}")))?;
-        let root_uri = PathUri::from_abs_path(&root);
-        let permissions = PermissionProfile::workspace_write_with_path_uris(
-            std::slice::from_ref(&root_uri),
-            NetworkSandboxPolicy::Restricted,
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
-        );
-        Ok(FileSystemSandboxContext::from_permission_profile(
-            permissions,
-            root_uri,
-        ))
+        managed_storage_sandbox_for_root(&self.managed_storage_root)
     }
 
     pub(crate) async fn read_file(
@@ -303,6 +289,24 @@ fn closest_existing_ancestor(path: &Path) -> Option<&Path> {
     None
 }
 
+fn managed_storage_sandbox_for_root(
+    root_path: &Path,
+) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
+    let root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(root_path)
+        .map_err(|err| invalid_request(format!("invalid CODEX_HOME attachments root: {err}")))?;
+    let root_uri = PathUri::from_abs_path(&root);
+    let permissions = PermissionProfile::workspace_write_with_path_uris(
+        std::slice::from_ref(&root_uri),
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    Ok(FileSystemSandboxContext::from_permission_profile(
+        permissions,
+        root_uri,
+    ))
+}
+
 fn map_fs_error(err: io::Error) -> JSONRPCErrorError {
     if err.kind() == io::ErrorKind::InvalidInput {
         invalid_request(err.to_string())
@@ -325,6 +329,25 @@ mod tests {
 
         assert!(validate_managed_storage_path(&inside, &managed_root).is_ok());
         assert!(validate_managed_storage_path(&outside, &managed_root).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_storage_sandbox_is_managed_and_scoped() -> io::Result<()> {
+        let home = tempdir()?;
+        let managed_root = home.path().join("attachments");
+        std::fs::create_dir_all(&managed_root)?;
+
+        let sandbox = managed_storage_sandbox_for_root(&managed_root)?;
+        assert!(matches!(
+            sandbox.permissions,
+            PermissionProfile::Managed { .. }
+        ));
+        assert!(sandbox.should_write_into_sandbox());
+        assert_eq!(
+            sandbox.workspace_roots,
+            vec![PathUri::from_host_native_path(&managed_root)?]
+        );
         Ok(())
     }
 
