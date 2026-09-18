@@ -127,24 +127,6 @@ fn network_seccomp_mode(
 }
 
 /// Enable `PR_SET_NO_NEW_PRIVS` so seccomp can be applied safely.
-/// Installs a Landlock layer that denies filesystem deletion/rename while preserving
-/// every other filesystem right already granted by the active sandbox.
-/// This is intentionally independent of the write-capability policy.
-pub(crate) fn install_delete_fence_on_current_thread() -> Result<()> {
-    let abi = ABI::V5;
-    let handled = AccessFs::RemoveDir | AccessFs::RemoveFile | AccessFs::Refer;
-    let ruleset = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(handled)?
-        .create()?
-        .set_no_new_privs(true);
-    let status = ruleset.restrict_self()?;
-    if status.ruleset == landlock::RulesetStatus::NotEnforced {
-        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
-    }
-    Ok(())
-}
-
 fn set_no_new_privs() -> Result<()> {
     let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if result != 0 {
@@ -167,13 +149,11 @@ fn install_filesystem_landlock_rules_on_current_thread(
 ) -> Result<()> {
     let abi = ABI::V5;
     // Workspace-write must not imply deletion. Landlock models unlink/rmdir and
-    // rename/replace as dedicated rights, so deliberately leave those rights
-    // unhandled by writable-root rules.
-    let delete_free_rw = AccessFs::from_all(abi)
+    // rename/replace as dedicated rights, so leave those rights unhandled here.
+    let access_rw = AccessFs::from_all(abi)
         & !AccessFs::RemoveDir
         & !AccessFs::RemoveFile
         & !AccessFs::Refer;
-    let access_rw = delete_free_rw;
     let access_ro = AccessFs::from_read(abi);
 
     let mut ruleset = Ruleset::default()
@@ -253,3 +233,152 @@ fn install_network_seccomp_filter_on_current_thread(
             )?])?;
 
             rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);
+            rules.insert(libc::SYS_socketpair, vec![unix_only_rule]);
+        }
+        NetworkSeccompMode::ProxyRouted => {
+            // In proxy-routed mode we allow IP sockets in the isolated
+            // namespace (used to reach the local TCP bridge). Standalone Unix
+            // sockets require an explicit managed-policy grant; all other
+            // socket families remain denied.
+            let mut denied_socket_conditions = vec![
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    libc::AF_INET as u64,
+                )?,
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    libc::AF_INET6 as u64,
+                )?,
+            ];
+            if managed_network.is_some_and(|context| context.dangerously_allow_all_unix_sockets) {
+                denied_socket_conditions.push(SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    libc::AF_UNIX as u64,
+                )?);
+            }
+            let deny_non_ip_socket = SeccompRule::new(denied_socket_conditions)?;
+            let deny_non_unix_socketpair = SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_UNIX as u64,
+            )?])?;
+            rules.insert(libc::SYS_socket, vec![deny_non_ip_socket]);
+            rules.insert(libc::SYS_socketpair, vec![deny_non_unix_socketpair]);
+        }
+        NetworkSeccompMode::VmSocketRestricted => {
+            let deny_vsock = SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                libc::AF_VSOCK as u64,
+            )?])?;
+            rules.insert(libc::SYS_socket, vec![deny_vsock.clone()]);
+            rules.insert(libc::SYS_socketpair, vec![deny_vsock]);
+        }
+    }
+
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,                     // default – allow
+        SeccompAction::Errno(libc::EPERM as u32), // when rule matches – return EPERM
+        if cfg!(target_arch = "x86_64") {
+            TargetArch::x86_64
+        } else if cfg!(target_arch = "aarch64") {
+            TargetArch::aarch64
+        } else {
+            unimplemented!("unsupported architecture for seccomp filter");
+        },
+    )?;
+
+    let prog: BpfProgram = filter.try_into()?;
+
+    apply_filter(&prog)?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkSeccompMode;
+    use super::network_seccomp_mode;
+    use super::should_install_network_seccomp;
+    use codex_protocol::protocol::NetworkSandboxPolicy;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn managed_network_enforces_seccomp_even_for_full_network_policy() {
+        assert_eq!(
+            should_install_network_seccomp(
+                NetworkSandboxPolicy::Enabled,
+                /*allow_network_for_proxy*/ true,
+            ),
+            true
+        );
+    }
+
+    #[test]
+    fn full_network_policy_without_managed_network_skips_seccomp() {
+        assert_eq!(
+            should_install_network_seccomp(
+                NetworkSandboxPolicy::Enabled,
+                /*allow_network_for_proxy*/ false,
+            ),
+            false
+        );
+    }
+
+    #[test]
+    fn restricted_network_policy_always_installs_seccomp() {
+        assert!(should_install_network_seccomp(
+            NetworkSandboxPolicy::Restricted,
+            /*allow_network_for_proxy*/ false,
+        ));
+        assert!(should_install_network_seccomp(
+            NetworkSandboxPolicy::Restricted,
+            /*allow_network_for_proxy*/ true,
+        ));
+    }
+
+    #[test]
+    fn managed_proxy_routes_use_proxy_routed_seccomp_mode() {
+        assert_eq!(
+            network_seccomp_mode(
+                NetworkSandboxPolicy::Enabled,
+                /*allow_network_for_proxy*/ true,
+                /*proxy_routed_network*/ true,
+            ),
+            Some(NetworkSeccompMode::ProxyRouted)
+        );
+    }
+
+    #[test]
+    fn restricted_network_without_proxy_routing_uses_restricted_mode() {
+        assert_eq!(
+            network_seccomp_mode(
+                NetworkSandboxPolicy::Restricted,
+                /*allow_network_for_proxy*/ false,
+                /*proxy_routed_network*/ false,
+            ),
+            Some(NetworkSeccompMode::Restricted)
+        );
+    }
+
+    #[test]
+    fn full_network_without_managed_proxy_skips_network_seccomp_mode() {
+        assert_eq!(
+            network_seccomp_mode(
+                NetworkSandboxPolicy::Enabled,
+                /*allow_network_for_proxy*/ false,
+                /*proxy_routed_network*/ false,
+            ),
+            None
+        );
+    }
+}
