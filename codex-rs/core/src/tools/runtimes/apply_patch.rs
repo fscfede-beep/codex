@@ -50,6 +50,7 @@ pub struct ApplyPatchRequest {
     pub action: ApplyPatchAction,
     pub file_paths: Vec<PathUri>,
     pub changes: Arc<std::collections::HashMap<PathBuf, FileChange>>,
+    pub destructive_targets: Vec<DestructivePatchTarget>,
     pub exec_approval_requirement: ExecApprovalRequirement,
     pub additional_permissions: Option<AdditionalPermissionProfile>,
     pub permissions_preapproved: bool,
