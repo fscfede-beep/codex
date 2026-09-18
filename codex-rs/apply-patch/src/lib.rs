@@ -672,15 +672,44 @@ pub async fn apply_patch_with_destructive_targets(
             return Err(ApplyPatchFailure::without_delta(ApplyPatchError::ParseError(e)));
         }
     };
-    if hunks.iter().any(hunk_is_destructive) && destructive_targets.is_empty() {
-        return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
-            context: "destructive apply_patch authorization".to_string(),
-            source: io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "destructive apply_patch requires verified object-identity preconditions",
-            ),
-        })));
+    if hunks.iter().any(hunk_is_destructive) {
+        if destructive_targets.is_empty() {
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+                context: "destructive apply_patch authorization".to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "destructive apply_patch requires verified object-identity preconditions",
+                ),
+            })));
+        }
+
+        // This API is a hard execution boundary too: a caller cannot pass approved
+        // destructive targets and then drop the scoped sandbox before mutation.
+        let scoped_sandbox = destructive_patch_sandbox(&hunks, cwd, sandbox)?;
+        let sandbox = scoped_sandbox.as_ref().or(sandbox);
+        if sandbox.is_none() {
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
+                context: "destructive apply_patch sandbox".to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "destructive apply_patch requires an enforceable scoped filesystem sandbox",
+                ),
+            })));
+        }
+
+        return apply_hunks_with_options_and_destructive_targets(
+            &hunks,
+            options,
+            cwd,
+            stdout,
+            stderr,
+            fs,
+            sandbox,
+            destructive_targets,
+        )
+        .await;
     }
+
     apply_hunks_with_options_and_destructive_targets(
         &hunks,
         options,
@@ -1807,6 +1836,49 @@ mod tests {
             ),
             cwd.clone(),
         )
+    }
+
+    #[tokio::test]
+    async fn destructive_execution_rejects_missing_sandbox_even_with_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let target = dir.path().join("delete.txt");
+        std::fs::write(&target, "protected").unwrap();
+        let sandbox = workspace_sandbox(&cwd);
+        let patch = "*** Begin Patch\\n*** Delete File: delete.txt\\n*** End Patch";
+
+        let action = match invocation::maybe_parse_apply_patch_verified(
+            &["apply_patch".to_string(), patch.to_string()],
+            &cwd,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            Some(&sandbox),
+        )
+        .await
+        {
+            invocation::MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified destructive patch, got {other:?}"),
+        };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = apply_patch_with_destructive_targets(
+            patch,
+            ApplyPatchOptions {
+                update_file_mode: ApplyPatchFileUpdateMode::default(),
+                follow_symlinks: false,
+            },
+            &cwd,
+            &mut stdout,
+            &mut stderr,
+            codex_exec_server::LOCAL_FS.as_ref(),
+            None,
+            action.destructive_targets(),
+        )
+        .await
+        .expect_err("destructive execution must fail without scoped sandbox");
+
+        assert!(format!("{err}").contains("explicit filesystem sandbox"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "protected");
     }
 
     #[tokio::test]
