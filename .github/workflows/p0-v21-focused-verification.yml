@@ -57,4 +57,4 @@ jobs:
 
       - name: Test user shell workspace confinement
         working-directory: codex-rs
-        run: cargo test -p codex-core user_shell_command_cannot_escape_workspace_root
+        run: cargo test -p codex-core user_shell_command_cannot_delete_outside_workspace_root
