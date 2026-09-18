@@ -46,6 +46,94 @@ pub fn dangerous_command_match_for_platform(
     dangerous_command_match_with_depth(command, /*wrapper_depth*/ 0, platform)
 }
 
+/// Returns true when a command can delete filesystem objects.
+///
+/// This is intentionally broader than the general dangerous-command classifier
+/// because deletion must never be granted by a reusable command rule.
+pub fn is_destructive_delete_command(command: &[String]) -> bool {
+    is_destructive_delete_command_with_depth(command, /*wrapper_depth*/ 0)
+}
+
+fn is_destructive_delete_command_with_depth(
+    command: &[String],
+    wrapper_depth: usize,
+) -> bool {
+    if wrapper_depth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH {
+        return true;
+    }
+
+    if matches!(
+        dangerous_command_match_for_platform(command, DangerousCommandPlatform::Posix),
+        Some(DangerousCommandMatch::ForcedRm)
+    ) {
+        return true;
+    }
+
+    if windows_dangerous_commands::is_destructive_delete_command_windows(command) {
+        return true;
+    }
+
+    if let Some(commands) = parse_shell_lc_literal_commands(command)
+        && commands
+            .iter()
+            .any(|nested| is_destructive_delete_command_with_depth(nested, wrapper_depth + 1))
+    {
+        return true;
+    }
+
+    let Some(exe) = command
+        .first()
+        .and_then(|raw| executable_name_lookup_key(raw, DangerousCommandPlatform::Posix))
+    else {
+        return false;
+    };
+
+    match exe.as_str() {
+        "rm" => command[1..]
+            .iter()
+            .any(|arg| arg != "--" && arg.starts_with('-') && arg.contains('r')),
+        "find" => command[1..]
+            .iter()
+            .any(|arg| arg == "-delete" || arg == "-delete=true"),
+        "unlink" | "shred" => true,
+        "git" => {
+            command.iter().skip(1).any(|arg| arg.eq_ignore_ascii_case("clean"))
+                && command.iter().skip(2).any(|arg| {
+                    matches!(arg.as_str(), "-f" | "-fd" | "-fx" | "-fdx")
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Returns true when stdin text contains a literal destructive filesystem operation.
+pub fn is_destructive_interactive_input(input: &str, platform: DangerousCommandPlatform) -> bool {
+    if input.trim().is_empty() {
+        return false;
+    }
+
+    match platform {
+        DangerousCommandPlatform::Posix => {
+            let command = vec!["sh".to_string(), "-c".to_string(), input.to_string()];
+            is_destructive_delete_command(&command)
+        }
+        DangerousCommandPlatform::Windows => {
+            let powershell = vec![
+                "powershell.exe".to_string(),
+                "-Command".to_string(),
+                input.to_string(),
+            ];
+            let cmd = vec![
+                "cmd.exe".to_string(),
+                "/d".to_string(),
+                "/c".to_string(),
+                input.to_string(),
+            ];
+            is_destructive_delete_command(&powershell) || is_destructive_delete_command(&cmd)
+        }
+    }
+}
+
 fn dangerous_command_match_with_depth(
     command: &[String],
     wrapper_depth: usize,
@@ -206,6 +294,42 @@ fn rm_args_include_force_option(args: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn destructive_interactive_input_detects_posix_delete_families() {
+        for input in [
+            "rm -rf /tmp/example",
+            "rm -r /tmp/example",
+            "find /tmp/example -delete",
+            "git clean -fdx",
+            "unlink /tmp/example",
+        ] {
+            assert!(
+                is_destructive_interactive_input(input, DangerousCommandPlatform::Posix),
+                "expected destructive input: {input}"
+            );
+        }
+        assert!(!is_destructive_interactive_input(
+            "printf '%s' rm -rf /tmp/example",
+            DangerousCommandPlatform::Posix,
+        ));
+    }
+
+    #[test]
+    fn destructive_interactive_input_detects_windows_delete_families() {
+        for input in [
+            "Remove-Item -Recurse C:\\work\\tree",
+            "Remove-Item C:\\work\\file.txt",
+            "cmd /d /c del C:\\work\\file.txt",
+            "cmd /d /c rmdir /s C:\\work\\tree",
+        ] {
+            assert!(
+                is_destructive_interactive_input(input, DangerousCommandPlatform::Windows),
+                "expected destructive input: {input}"
+            );
+        }
+    }
+
+
     use super::*;
     use pretty_assertions::assert_eq;
 

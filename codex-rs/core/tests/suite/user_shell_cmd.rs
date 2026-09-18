@@ -115,6 +115,65 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
 }
 
 #[tokio::test]
+async fn user_shell_command_cannot_delete_outside_workspace_root() -> anyhow::Result<()> {
+    let workspace = TempDir::new()?;
+    let workspace_cwd = workspace.path().to_path_buf();
+    let outside = workspace.path().parent().unwrap().join(format!(
+        "rumbo_p0_user_shell_delete_probe_{}.txt",
+        std::process::id()
+    ));
+    tokio::fs::write(&outside, "protected").await?;
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(move |config| {
+        config.cwd = workspace_cwd.abs();
+    });
+    let fixture = builder.build(&server).await?;
+
+    let command = match codex_core::shell::default_user_shell().name() {
+        "powershell" => format!(
+            "Remove-Item -Force (Join-Path (Split-Path -Parent (Get-Location).Path) '{}')",
+            outside.file_name().unwrap().to_string_lossy()
+        ),
+        "cmd" => format!(
+            "del /f /q ..\\{}",
+            outside.file_name().unwrap().to_string_lossy()
+        ),
+        _ => format!(
+            "rm -f -- ../{}",
+            outside.file_name().unwrap().to_string_lossy()
+        ),
+    };
+
+    fixture
+        .codex
+        .submit(Op::RunUserShellCommand {
+            command,
+            timeout_ms: None,
+        })
+        .await?;
+
+    let end = wait_for_event_match(&fixture.codex, |event| match event {
+        EventMsg::ExecCommandEnd(event) if event.source == ExecCommandSource::UserShell => {
+            Some(event.clone())
+        }
+        _ => None,
+    })
+    .await;
+
+    assert_ne!(
+        end.exit_code, 0,
+        "outside delete unexpectedly succeeded: {end:?}"
+    );
+    assert!(
+        outside.exists(),
+        "user shell deleted outside workspace root: {}",
+        outside.display()
+    );
+    tokio::fs::remove_file(&outside).await?;
+
+    Ok(())
+}
+#[tokio::test]
 async fn user_shell_command_without_local_environment_emits_error() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let mut builder = test_codex();

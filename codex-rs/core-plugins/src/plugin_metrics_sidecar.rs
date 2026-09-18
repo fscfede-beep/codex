@@ -4,10 +4,13 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemReadStream;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
@@ -57,6 +60,7 @@ enum PluginMetricsOutput {
 struct RemotePluginMetricsDirectory {
     filesystem: Arc<dyn ExecutorFileSystem>,
     path: PathUri,
+    sandbox: FileSystemSandboxContext,
 }
 
 impl Drop for RemotePluginMetricsDirectory {
@@ -66,6 +70,7 @@ impl Drop for RemotePluginMetricsDirectory {
         };
         let filesystem = Arc::clone(&self.filesystem);
         let path = self.path.clone();
+        let sandbox = self.sandbox.clone();
         runtime.spawn(async move {
             let _ = filesystem
                 .remove(
@@ -75,7 +80,7 @@ impl Drop for RemotePluginMetricsDirectory {
                         force: true,
                         follow_symlinks: true,
                     },
-                    /*sandbox*/ None,
+                    Some(&sandbox),
                 )
                 .await;
         });
@@ -155,9 +160,19 @@ impl PluginMetricsSidecar {
             )
             .await
             .ok()?;
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::workspace_write_with_path_uris(
+                std::slice::from_ref(&directory_path),
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ false,
+                /*exclude_slash_tmp*/ false,
+            ),
+            directory_path.clone(),
+        );
         let directory = RemotePluginMetricsDirectory {
             filesystem,
             path: directory_path,
+            sandbox,
         };
         let output_path = directory.path.join("measurements.json").ok()?;
         directory

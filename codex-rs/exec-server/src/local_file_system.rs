@@ -3,6 +3,9 @@ use codex_file_system::MAX_WALK_DIRECTORIES;
 use codex_file_system::MAX_WALK_ENTRIES;
 use codex_file_system::MAX_WALK_RESPONSE_BYTES;
 use codex_file_system::WALK_RESPONSE_ITEM_OVERHEAD_BYTES;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
@@ -240,8 +243,23 @@ impl LocalFileSystem {
         options: RemoveOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()> {
-        let (file_system, sandbox) = self.file_system_for_writes(sandbox)?;
-        file_system.remove(path, options, sandbox).await
+        let sandbox = sandbox.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destructive filesystem removal requires a scoped managed writable sandbox",
+            )
+        })?;
+        sandbox.validate_file_system_paths_for_current_host()?;
+        let policy = sandbox.permissions.file_system_sandbox_policy();
+        if policy.kind != FileSystemSandboxKind::Restricted
+            || !sandbox.should_write_into_sandbox()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destructive filesystem removal rejects unrestricted, external, or read-only sandbox authority",
+            ));
+        }
+        self.sandboxed()?.remove(path, options, Some(sandbox)).await
     }
 
     async fn copy(
@@ -1349,6 +1367,113 @@ mod tests {
         std::fs::remove_dir(&source_dir)?;
 
         assert_eq!(symlink_points_to_directory(&link_path)?, true);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod delete_gate_tests {
+    use super::*;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use pretty_assertions::assert_eq;
+
+    fn restricted_sandbox(root: &PathUri) -> FileSystemSandboxContext {
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(
+                &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+                    root.clone().into(),
+                    FileSystemAccessMode::Write,
+                )]),
+                NetworkSandboxPolicy::Restricted,
+            ),
+            root.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn remove_without_sandbox_is_rejected_before_io() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let path = PathUri::from_host_native_path(&target)?;
+
+        let error = LocalFileSystem::unsandboxed()
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                None,
+            )
+            .await
+            .expect_err("unsandboxed deletion must fail closed");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(target.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_with_unrestricted_context_is_rejected_before_io() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let root = PathUri::from_host_native_path(temp.path())?;
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::Disabled,
+            root.clone(),
+        );
+        let path = PathUri::from_host_native_path(&target)?;
+
+        let error = LocalFileSystem::unsandboxed()
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                Some(&sandbox),
+            )
+            .await
+            .expect_err("unrestricted deletion must fail closed");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(target.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_with_read_only_context_is_rejected_before_io() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let root = PathUri::from_host_native_path(temp.path())?;
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::read_only(),
+            root.clone(),
+        );
+        let path = PathUri::from_host_native_path(&target)?;
+
+        let error = LocalFileSystem::unsandboxed()
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                Some(&sandbox),
+            )
+            .await
+            .expect_err("read-only deletion must fail closed");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(target.exists());
         Ok(())
     }
 }

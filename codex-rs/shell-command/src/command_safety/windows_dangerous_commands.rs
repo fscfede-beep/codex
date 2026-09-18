@@ -3,6 +3,82 @@ use regex::Regex;
 use shlex::split as shlex_split;
 use url::Url;
 
+/// Returns true when the Windows command line contains a filesystem deletion operation.
+pub(crate) fn is_destructive_delete_command_windows(command: &[String]) -> bool {
+    let Some((exe, rest)) = command.split_first() else {
+        return false;
+    };
+
+    if is_powershell_executable(exe) {
+        if let Some(parsed) = parse_powershell_invocation(rest) {
+            if has_any_delete_cmdlet(&parsed.tokens) {
+                return true;
+            }
+        }
+    }
+
+    let Some(base) = executable_basename(exe) else {
+        return false;
+    };
+    if base != "cmd" && base != "cmd.exe" {
+        return false;
+    }
+
+    let mut iter = rest.iter();
+    for arg in iter.by_ref() {
+        let lower = arg.to_ascii_lowercase();
+        match lower.as_str() {
+            "/c" | "/r" | "-c" => break,
+            _ if lower.starts_with('/') => continue,
+            _ => return false,
+        }
+    }
+    let remaining: Vec<String> = iter.cloned().collect();
+    if remaining.is_empty() {
+        return false;
+    }
+    let cmd_tokens = match remaining.as_slice() {
+        [only] => shlex_split(only).unwrap_or_else(|| vec![only.clone()]),
+        _ => remaining,
+    };
+    let tokens: Vec<String> = cmd_tokens
+        .into_iter()
+        .flat_map(|t| split_embedded_cmd_operators(&t))
+        .collect();
+    const CMD_SEPARATORS: &[&str] = &["&", "&&", "|", "||"];
+    tokens.split(|t| CMD_SEPARATORS.contains(&t.as_str())).any(|segment| {
+        let Some(cmd) = segment.first() else {
+            return false;
+        };
+        if cmd.eq_ignore_ascii_case("del") || cmd.eq_ignore_ascii_case("erase") {
+            return true;
+        }
+        (cmd.eq_ignore_ascii_case("rd") || cmd.eq_ignore_ascii_case("rmdir"))
+            && has_recursive_flag_cmd(segment)
+    })
+}
+
+fn has_any_delete_cmdlet(tokens: &[String]) -> bool {
+    const DELETE_CMDLETS: &[&str] =
+        &["remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"];
+    const SEPS: &[char] = &['{', '}', '(', ')', '[', ']', ',', ';', '|', '&', '\n', '\r', '\t'];
+    let atoms = tokens
+        .iter()
+        .flat_map(|t| t.split(|c| SEPS.contains(&c)))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut has_delete = false;
+    for atom in atoms {
+        if DELETE_CMDLETS
+            .iter()
+            .any(|cmd| atom.eq_ignore_ascii_case(cmd))
+        {
+            has_delete = true;
+        }
+    }
+    has_delete
+}
+
 pub fn is_dangerous_command_windows(command: &[String]) -> bool {
     // Prefer structured parsing for PowerShell/CMD so we can spot URL-bearing
     // invocations of ShellExecute-style entry points before falling back to
@@ -342,52 +418,7 @@ fn executable_basename(exe: &str) -> Option<String> {
         _ => name,
     };
     (!name.is_empty()).then(|| name.to_ascii_lowercase())
-}
-
-fn is_powershell_executable(exe: &str) -> bool {
-    matches!(
-        executable_basename(exe).as_deref(),
-        Some("powershell") | Some("powershell.exe") | Some("pwsh") | Some("pwsh.exe")
-    )
-}
-
-fn is_browser_executable(name: &str) -> bool {
-    matches!(
-        name,
-        "chrome"
-            | "chrome.exe"
-            | "msedge"
-            | "msedge.exe"
-            | "firefox"
-            | "firefox.exe"
-            | "iexplore"
-            | "iexplore.exe"
-    )
-}
-
-struct ParsedPowershell {
-    tokens: Vec<String>,
-}
-
-fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
-    if args.is_empty() {
-        return None;
-    }
-
-    let mut idx = 0;
-    while idx < args.len() {
-        let arg = &args[idx];
-        let lower = arg.to_ascii_lowercase();
-        match lower.as_str() {
-            "-command" | "/command" | "-c" => {
-                let script = args.get(idx + 1)?;
-                if idx + 2 != args.len() {
-                    return None;
-                }
-                let tokens = shlex_split(script)?;
-                return Some(ParsedPowershell { tokens });
-            }
-            _ if lower.starts_with("-command:") || lower.starts_with("/command:") => {
+}_ if lower.starts_with("-command:") || lower.starts_with("/command:") => {
                 if idx + 1 != args.len() {
                     return None;
                 }

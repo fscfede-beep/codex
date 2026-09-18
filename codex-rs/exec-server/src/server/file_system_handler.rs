@@ -299,17 +299,20 @@ impl FileSystemHandler {
         &self,
         params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        let recursive = params.recursive.unwrap_or(true);
-        let force = params.force.unwrap_or(true);
+        let sandbox = params.sandbox.as_ref().ok_or_else(|| {
+            invalid_request(
+                "fs/remove requires an explicit scoped filesystem sandbox; unscoped deletion is disabled",
+            )
+        })?;
         self.file_system
             .remove(
                 &params.path,
                 RemoveOptions {
-                    recursive,
-                    force,
+                    recursive: params.recursive.unwrap_or(true),
+                    force: params.force.unwrap_or(true),
                     follow_symlinks: params.follow_symlinks.unwrap_or(true),
                 },
-                params.sandbox.as_ref(),
+                Some(sandbox),
             )
             .await
             .map_err(map_fs_error)?;
