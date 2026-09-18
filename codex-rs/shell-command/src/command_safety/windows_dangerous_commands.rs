@@ -11,7 +11,7 @@ pub(crate) fn is_destructive_delete_command_windows(command: &[String]) -> bool 
 
     if is_powershell_executable(exe) {
         if let Some(parsed) = parse_powershell_invocation(rest) {
-            if has_destructive_delete_cmdlet(&parsed.tokens) {
+            if has_any_delete_cmdlet(&parsed.tokens) {
                 return true;
             }
         }
@@ -58,7 +58,7 @@ pub(crate) fn is_destructive_delete_command_windows(command: &[String]) -> bool 
     })
 }
 
-fn has_destructive_delete_cmdlet(tokens: &[String]) -> bool {
+fn has_any_delete_cmdlet(tokens: &[String]) -> bool {
     const DELETE_CMDLETS: &[&str] =
         &["remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"];
     const SEPS: &[char] = &['{', '}', '(', ')', '[', ']', ',', ';', '|', '&', '\n', '\r', '\t'];
@@ -68,7 +68,6 @@ fn has_destructive_delete_cmdlet(tokens: &[String]) -> bool {
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let mut has_delete = false;
-    let mut has_recurse_or_force = false;
     for atom in atoms {
         if DELETE_CMDLETS
             .iter()
@@ -76,15 +75,8 @@ fn has_destructive_delete_cmdlet(tokens: &[String]) -> bool {
         {
             has_delete = true;
         }
-        if atom.eq_ignore_ascii_case("-force")
-            || atom.eq_ignore_ascii_case("-recurse")
-            || atom.eq_ignore_ascii_case("-recursive")
-            || atom.eq_ignore_ascii_case("/s")
-        {
-            has_recurse_or_force = true;
-        }
     }
-    has_delete && has_recurse_or_force
+    has_delete
 }
 
 pub fn is_dangerous_command_windows(command: &[String]) -> bool {
@@ -427,78 +419,3 @@ fn executable_basename(exe: &str) -> Option<String> {
     };
     (!name.is_empty()).then(|| name.to_ascii_lowercase())
 }
-
-fn is_powershell_executable(exe: &str) -> bool {
-    matches!(
-        executable_basename(exe).as_deref(),
-        Some("powershell") | Some("powershell.exe") | Some("pwsh") | Some("pwsh.exe")
-    )
-}
-
-fn is_browser_executable(name: &str) -> bool {
-    matches!(
-        name,
-        "chrome"
-            | "chrome.exe"
-            | "msedge"
-            | "msedge.exe"
-            | "firefox"
-            | "firefox.exe"
-            | "iexplore"
-            | "iexplore.exe"
-    )
-}
-
-struct ParsedPowershell {
-    tokens: Vec<String>,
-}
-
-fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
-    if args.is_empty() {
-        return None;
-    }
-
-    let mut idx = 0;
-    while idx < args.len() {
-        let arg = &args[idx];
-        let lower = arg.to_ascii_lowercase();
-        match lower.as_str() {
-            "-command" | "/command" | "-c" => {
-                let script = args.get(idx + 1)?;
-                if idx + 2 != args.len() {
-                    return None;
-                }
-                let tokens = shlex_split(script)?;
-                return Some(ParsedPowershell { tokens });
-            }
-            _ if lower.starts_with("-command:") || lower.starts_with("/command:") => {
-                if idx + 1 != args.len() {
-                    return None;
-                }
-                let (_, script) = arg.split_once(':')?;
-                let tokens = shlex_split(script)?;
-                return Some(ParsedPowershell { tokens });
-            }
-            "-nologo" | "-noprofile" | "-noninteractive" | "-mta" | "-sta" => {
-                idx += 1;
-            }
-            _ if lower.starts_with('-') => {
-                idx += 1;
-            }
-            _ => {
-                let rest = args[idx..].to_vec();
-                return Some(ParsedPowershell { tokens: rest });
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_dangerous_command_windows;
-
-    fn vec_str(items: &[&str]) -> Vec<String> {
-        items.iter().map(std::string::ToString::to_string).collect()
-    }
