@@ -299,7 +299,8 @@ impl LocalFileSystem {
         }
         #[cfg(windows)]
         {
-            let wide = OsStr::new(path.as_path())
+            let wide = path.as_path()
+                .as_os_str()
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect::<Vec<_>>();
