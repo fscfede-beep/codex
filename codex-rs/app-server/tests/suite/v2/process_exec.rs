@@ -21,11 +21,7 @@ async fn process_spawn_is_fail_closed_until_sandboxed() -> Result<()> {
         .send_process_spawn_request(process_spawn_params(
             "disabled-process".to_string(),
             codex_home.path(),
-            vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                "true".to_string(),
-            ],
+            vec!["sh".to_string(), "-lc".to_string(), "true".to_string()],
         )?)
         .await?;
     let error = mcp
