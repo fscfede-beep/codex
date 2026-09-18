@@ -31,22 +31,26 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::RemoveOptions;
 use codex_utils_path_uri::PathUri;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct FsRequestProcessor {
     environment_manager: Arc<EnvironmentManager>,
     fs_watch_manager: FsWatchManager,
+    managed_storage_root: PathBuf,
 }
 
 impl FsRequestProcessor {
     pub(crate) fn new(
         environment_manager: Arc<EnvironmentManager>,
         fs_watch_manager: FsWatchManager,
+        codex_home: PathBuf,
     ) -> Self {
         Self {
             environment_manager,
             fs_watch_manager,
+            managed_storage_root: codex_home.join("attachments"),
         }
     }
 
@@ -59,6 +63,13 @@ impl FsRequestProcessor {
 
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
         self.fs_watch_manager.connection_closed(connection_id).await;
+    }
+
+    fn validate_managed_storage_path(
+        &self,
+        path: &codex_utils_absolute_path::AbsolutePathBuf,
+    ) -> Result<(), JSONRPCErrorError> {
+        validate_managed_storage_path(path.as_path(), &self.managed_storage_root)
     }
 
     pub(crate) async fn read_file(
@@ -85,6 +96,7 @@ impl FsRequestProcessor {
                 "fs/writeFile requires valid base64 dataBase64: {err}"
             ))
         })?;
+        self.validate_managed_storage_path(&params.path)?;
         let path = PathUri::from_abs_path(&params.path);
         self.file_system()?
             .write_file(&path, bytes, Default::default(), /*sandbox*/ None)
@@ -97,6 +109,7 @@ impl FsRequestProcessor {
         &self,
         params: FsCreateDirectoryParams,
     ) -> Result<FsCreateDirectoryResponse, JSONRPCErrorError> {
+        self.validate_managed_storage_path(&params.path)?;
         let path = PathUri::from_abs_path(&params.path);
         self.file_system()?
             .create_directory(
@@ -166,6 +179,8 @@ impl FsRequestProcessor {
         &self,
         params: FsCopyParams,
     ) -> Result<FsCopyResponse, JSONRPCErrorError> {
+        self.validate_managed_storage_path(&params.source_path)?;
+        self.validate_managed_storage_path(&params.destination_path)?;
         let source_path = PathUri::from_abs_path(&params.source_path);
         let destination_path = PathUri::from_abs_path(&params.destination_path);
         self.file_system()?
@@ -199,6 +214,60 @@ impl FsRequestProcessor {
         self.file_system()?;
         self.fs_watch_manager.unwatch(connection_id, params).await
     }
+}
+
+fn validate_managed_storage_path(path: &Path, managed_root: &Path) -> Result<(), JSONRPCErrorError> {
+    if !path.starts_with(managed_root) {
+        return Err(invalid_request(
+            "filesystem mutation is limited to Codex-managed attachments",
+        ));
+    }
+
+    let Some(codex_home) = managed_root.parent() else {
+        return Err(internal_error(
+            "managed filesystem root has no CODEX_HOME parent",
+        ));
+    };
+    let canonical_home = std::fs::canonicalize(codex_home).map_err(|err| {
+        invalid_request(format!(
+            "cannot establish CODEX_HOME safety root for filesystem mutation: {err}"
+        ))
+    })?;
+
+    let existing = closest_existing_ancestor(path).ok_or_else(|| {
+        invalid_request("filesystem mutation target has no existing safety ancestor")
+    })?;
+    let canonical_existing = std::fs::canonicalize(existing).map_err(|err| {
+        invalid_request(format!(
+            "cannot canonicalize filesystem mutation safety ancestor: {err}"
+        ))
+    })?;
+    if !canonical_existing.starts_with(&canonical_home) {
+        return Err(invalid_request(
+            "filesystem mutation path resolves outside CODEX_HOME",
+        ));
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(invalid_request(
+            "filesystem mutation does not follow symlink targets",
+        ));
+    }
+
+    Ok(())
+}
+
+fn closest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
 }
 
 fn map_fs_error(err: io::Error) -> JSONRPCErrorError {
