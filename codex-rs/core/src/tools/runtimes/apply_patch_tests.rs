@@ -362,7 +362,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
 
 #[test]
 fn destructive_patch_runtime_requires_sandbox_and_disables_escalation_retry() {
-    let path = PathUri::from_path(&std::env::temp_dir().join("destructive-overwrite.txt"));
+    let path = PathUri::from_host_native_path(std::env::temp_dir().join("destructive-overwrite.txt")).expect("temp path URI");
     let action = ApplyPatchAction::new_add_for_test(&path, "replacement".to_string());
     let runtime = ApplyPatchRuntime::new_for_action(&action);
 
