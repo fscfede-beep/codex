@@ -12,3 +12,7 @@ pub mod parse_command;
 pub mod powershell;
 
 pub use command_safety::is_dangerous_command;
+
+pub use command_safety::is_destructive_delete_command;
+pub use command_safety::is_destructive_interactive_input;
+pub use command_safety::DangerousCommandPlatform;
