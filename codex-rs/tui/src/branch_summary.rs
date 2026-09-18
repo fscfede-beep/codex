@@ -226,10 +226,6 @@ async fn get_default_branch(
             return Some(branch);
         }
 
-        if let Some(branch) = get_remote_default_branch_from_remote_show(runner, cwd, &remote).await
-        {
-            return Some(branch);
-        }
     }
 
     get_default_branch_local(runner, cwd).await
@@ -263,40 +259,6 @@ async fn get_remote_default_branch_from_symbolic_ref(
     Some(DefaultBranch {
         merge_ref: trimmed.to_string(),
     })
-}
-
-/// Parses `git remote show` output to discover a remote's default branch ref.
-///
-/// This is a fallback for repositories where `refs/remotes/<remote>/HEAD` is not configured but
-/// `git remote show` can still report the upstream HEAD branch. The concrete remote-tracking ref
-/// must already exist locally before it is accepted.
-async fn get_remote_default_branch_from_remote_show(
-    runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
-    remote: &str,
-) -> Option<DefaultBranch> {
-    let output = run_git_command(runner, cwd, &["remote", "show", "-n", remote])
-        .await
-        .ok()?;
-    if !output.success() {
-        return None;
-    }
-
-    for line in output.stdout.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("HEAD branch:") else {
-            continue;
-        };
-        let name = rest.trim();
-        let remote_ref = format!("refs/remotes/{remote}/{name}");
-        if !name.is_empty() && git_ref_exists(runner, cwd, &remote_ref).await {
-            return Some(DefaultBranch {
-                merge_ref: remote_ref,
-            });
-        }
-    }
-
-    None
 }
 
 /// Falls back to local `main` or `master` when no remote default branch can be found.
@@ -571,13 +533,17 @@ mod tests {
     }
 
     #[tokio::test]
-    #[tokio::test]
-    async fn remote_default_branch_fallback_does_not_query_remote() {
+    async fn default_branch_fallback_does_not_query_remote() {
         let runner = FakeRunner::new(vec![
             response(
-                &["git", "remote", "show", "-n", "origin"],
+                &["git", "remote"],
                 /*exit_code*/ 0,
-                "* remote origin\n  HEAD branch: main\n",
+                "origin\n",
+            ),
+            response(
+                &["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                /*exit_code*/ 1,
+                "",
             ),
             response(
                 &[
@@ -585,31 +551,28 @@ mod tests {
                     "rev-parse",
                     "--verify",
                     "--quiet",
-                    "refs/remotes/origin/main",
+                    "refs/heads/main",
                 ],
                 /*exit_code*/ 0,
-                "remote-main-sha\n",
+                "local-main-sha\n",
             ),
         ]);
 
-        let branch = get_remote_default_branch_from_remote_show(
-            &runner,
-            Path::new("/repo"),
-            "origin",
-        )
-        .await
-        .expect("default branch");
+        let branch = get_default_branch(&runner, Path::new("/repo"))
+            .await
+            .expect("default branch");
 
         assert_eq!(
             branch,
             DefaultBranch {
-                merge_ref: "refs/remotes/origin/main".to_string(),
+                merge_ref: "refs/heads/main".to_string(),
             }
         );
-        assert!(runner.saw(&["git", "remote", "show", "-n", "origin"]));
         assert!(!runner.saw(&["git", "remote", "show", "origin"]));
+        assert!(!runner.saw(&["git", "remote", "show", "-n", "origin"]));
     }
 
+    #[tokio::test]
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
             &["gh", "pr", "view", "--json", "number,url,state"],
