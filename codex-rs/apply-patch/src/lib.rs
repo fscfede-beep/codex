@@ -393,15 +393,15 @@ async fn revalidate_destructive_target(
                     parent.inferred_native_path_string()
                 );
             }
-            let actual_identity = fs
-                .get_object_identity(parent, sandbox)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "destructive apply_patch parent identity is unavailable: {}",
-                        parent.inferred_native_path_string()
-                    )
-                })?;
+            let actual_identity =
+                fs.get_object_identity(parent, sandbox)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "destructive apply_patch parent identity is unavailable: {}",
+                            parent.inferred_native_path_string()
+                        )
+                    })?;
             if &actual_identity != identity {
                 anyhow::bail!(
                     "destructive apply_patch parent identity changed: {}",
