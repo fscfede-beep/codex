@@ -30,6 +30,11 @@ pub struct CapSids {
     /// later workspace sandboxes.
     #[serde(default)]
     pub writable_root_by_path: HashMap<String, String>,
+    /// Per-workspace-root SIDs used only as restrictive DELETE blockers for
+    /// normal process sandboxes. The ACL remains root-scoped; the SID itself
+    /// is not an access grant.
+    #[serde(default)]
+    pub delete_deny_by_path: HashMap<String, String>,
 }
 
 pub fn cap_sid_file(codex_home: &Path) -> PathBuf {
@@ -70,6 +75,7 @@ pub fn load_or_create_cap_sids(codex_home: &Path) -> Result<CapSids> {
                 readonly: make_random_cap_sid_string(),
                 workspace_by_cwd: HashMap::new(),
                 writable_root_by_path: HashMap::new(),
+                delete_deny_by_path: HashMap::new(),
             };
             persist_caps(&path, &caps)?;
             return Ok(caps);
@@ -80,6 +86,7 @@ pub fn load_or_create_cap_sids(codex_home: &Path) -> Result<CapSids> {
         readonly: make_random_cap_sid_string(),
         workspace_by_cwd: HashMap::new(),
         writable_root_by_path: HashMap::new(),
+        delete_deny_by_path: HashMap::new(),
     };
     persist_caps(&path, &caps)?;
     Ok(caps)
@@ -133,6 +140,24 @@ pub fn workspace_write_root_overlaps_path(root: &Path, path: &Path) -> bool {
     workspace_write_root_contains_path(root, path) || workspace_write_root_contains_path(path, root)
 }
 
+/// Returns the persistent, root-scoped SID used to deny deletion to ordinary
+/// workspace-write process tokens.
+pub fn delete_deny_sid_for_root(
+    codex_home: &Path,
+    root: &Path,
+) -> Result<String> {
+    let path = cap_sid_file(codex_home);
+    let mut caps = load_or_create_cap_sids(codex_home)?;
+    let key = canonical_path_key(root);
+    if let Some(sid) = caps.delete_deny_by_path.get(&key) {
+        return Ok(sid.clone());
+    }
+    let sid = make_random_cap_sid_string();
+    caps.delete_deny_by_path.insert(key, sid.clone());
+    persist_caps(&path, &caps)?;
+    Ok(sid)
+}
+
 pub fn workspace_write_root_specificity(root: &Path) -> usize {
     canonicalize_path(root).components().count()
 }
@@ -143,6 +168,7 @@ mod tests {
     use super::workspace_cap_sid_for_cwd;
     use super::workspace_write_cap_sid_for_root;
     use super::writable_root_cap_sid_for_path;
+    use super::delete_deny_sid_for_root;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -199,5 +225,23 @@ mod tests {
         let caps = load_or_create_cap_sids(&codex_home).expect("load caps");
         assert_eq!(caps.workspace_by_cwd.len(), 1);
         assert_eq!(caps.writable_root_by_path.len(), 1);
+    }
+
+    #[test]
+    fn delete_deny_sids_are_stable_and_root_scoped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let root_a = temp.path().join("a");
+        let root_b = temp.path().join("b");
+        std::fs::create_dir_all(&root_a).expect("root a");
+        std::fs::create_dir_all(&root_b).expect("root b");
+        let a1 = delete_deny_sid_for_root(&codex_home, &root_a).expect("sid a");
+        let a2 = delete_deny_sid_for_root(&codex_home, &root_a).expect("sid a stable");
+        let b = delete_deny_sid_for_root(&codex_home, &root_b).expect("sid b");
+        assert_eq!(a1, a2);
+        assert_ne!(a1, b);
+        let caps = load_or_create_cap_sids(&codex_home).expect("caps");
+        assert_eq!(caps.delete_deny_by_path.len(), 2);
     }
 }
