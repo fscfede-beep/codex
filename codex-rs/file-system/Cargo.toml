@@ -18,6 +18,7 @@ serde = { workspace = true, features = ["derive"] }
 [lib]
 test = false
 doctest = false
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
