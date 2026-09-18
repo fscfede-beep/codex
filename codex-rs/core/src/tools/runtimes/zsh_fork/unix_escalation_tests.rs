@@ -804,6 +804,39 @@ host_executable(name = "git", paths = ["{git_path_literal}"])
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn sandboxed_zsh_launch_cannot_escalate_to_unsandboxed() -> anyhow::Result<()> {
+    let (session, turn_context) = make_session_and_context().await;
+    let workdir = test_sandbox_cwd();
+    let provider = CoreShellActionProvider {
+        policy: Arc::new(RwLock::new(PolicyParser::new().build())),
+        session: Arc::new(session),
+        review_context: GuardianReviewContext::from(Arc::new(turn_context)),
+        call_id: "sandboxed-no-unsandbox".to_string(),
+        environment_id: "local".to_string(),
+        source: GuardianCommandSource::UnifiedExec,
+        tool_name: ToolName::plain("exec_command"),
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: PermissionProfile::workspace_write(),
+        sandbox_permissions: SandboxPermissions::RequireEscalated,
+        approval_sandbox_permissions: SandboxPermissions::RequireEscalated,
+        prompt_permissions: None,
+        stopwatch: codex_shell_escalation::Stopwatch::new(Duration::from_secs(1)),
+        allow_unsandboxed_escalation: false,
+    };
+
+    let action = codex_shell_escalation::EscalationPolicy::determine_action(
+        &provider,
+        &AbsolutePathBuf::try_from(host_absolute_path(&["usr", "bin", "printf"])).unwrap(),
+        &["printf".to_string(), "hello".to_string()],
+        &workdir,
+    )
+    .await?;
+
+    assert_eq!(action, codex_shell_escalation::EscalationDecision::Run);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn denied_reads_keep_prefix_rule_allow_inside_sandbox() -> anyhow::Result<()> {
     let cat_path = host_absolute_path(&["usr", "bin", "cat"]);
     let cat_path_literal = starlark_string(&cat_path);
