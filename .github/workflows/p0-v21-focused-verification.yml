@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - p0/v22-destructive-scope-gate
+      - p0/v23-destructive-object-identity
   pull_request:
     branches:
       - p0/v21-reconciled-review
