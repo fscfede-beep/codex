@@ -7,7 +7,6 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
@@ -65,7 +64,6 @@ use crate::FileSystemReadStream;
 use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
 use crate::GetMetadataOptions;
-use codex_file_system::FileSystemObjectIdentity;
 use crate::ReadDirectoryEntry;
 use crate::ReadFileOptions;
 use crate::RemoveOptions;
@@ -297,7 +295,8 @@ impl LocalFileSystem {
         }
         #[cfg(windows)]
         {
-            let wide = path.as_path()
+            let wide = path
+                .as_path()
                 .as_os_str()
                 .encode_wide()
                 .chain(std::iter::once(0))
@@ -327,9 +326,7 @@ impl LocalFileSystem {
             let _guard = guard;
             return Ok(Some(FileSystemObjectIdentity::new(format!(
                 "windows:{:08x}:{:08x}{:08x}",
-                info.dwVolumeSerialNumber,
-                info.nFileIndexHigh,
-                info.nFileIndexLow
+                info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
             ))));
         }
         #[cfg(not(any(unix, windows)))]
