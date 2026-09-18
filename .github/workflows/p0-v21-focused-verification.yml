@@ -1,0 +1,47 @@
+name: P0 V21 focused verification
+
+on:
+  push:
+    branches:
+      - p0/v21-reconciled-review
+  pull_request:
+    branches:
+      - p0/v21-reconciled-review
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Compile affected crates
+        run: cargo check -p codex-apply-patch -p codex-core -p codex-exec-server -p codex-arg0 -p codex-tui
+
+      - name: Test destructive apply_patch controls
+        run: cargo test -p codex-core destructive_patch --lib
+
+      - name: Test apply-patch package
+        run: cargo test -p codex-apply-patch --lib
+
+      - name: Test approval overlay controls
+        run: cargo test -p codex-tui destructive_patch_options_are_fresh_only --lib
