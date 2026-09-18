@@ -1020,6 +1020,9 @@ async fn apply_hunks_to_files(
                     &mut delta.exact,
                 )
                 .await;
+                if let Some(source_target) = destructive_source.as_ref() {
+                    revalidate_destructive_target(source_target, fs, sandbox).await?;
+                }
                 let AppliedPatch {
                     original_contents,
                     new_contents,
