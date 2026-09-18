@@ -456,16 +456,19 @@ impl ApplyPatchAction {
     /// AddFile is included because the current implementation writes the target path directly
     /// and therefore may overwrite an existing file.
     pub fn is_destructive(&self) -> bool {
-        self.changes.values().any(|change| {
-            matches!(
-                change,
-                ApplyPatchFileChange::Add { .. }
-                    | ApplyPatchFileChange::Delete { .. }
-                    | ApplyPatchFileChange::Update {
-                        move_path: Some(_),
-                        ..
-                    }
-            )
+        self.changes.iter().any(|(path, change)| match change {
+            ApplyPatchFileChange::Delete { .. }
+            | ApplyPatchFileChange::Update {
+                move_path: Some(_),
+                ..
+            } => true,
+            ApplyPatchFileChange::Add { .. } => self.destructive_targets.iter().any(|target| {
+                target.path() == path
+                    && matches!(target.state(), DestructivePatchTargetState::Existing(_))
+            }),
+            ApplyPatchFileChange::Update {
+                move_path: None, ..
+            } => false,
         })
     }
 
@@ -810,7 +813,7 @@ async fn apply_hunks_with_options(
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
+    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &[], &mut delta).await {
         Ok(affected_paths) => {
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
@@ -887,8 +890,32 @@ async fn apply_hunks_to_files(
         let path_uri = hunk.resolve_path(cwd)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
-                let target = destructive_target_for_path(destructive_targets, &path_uri)?;
-                revalidate_destructive_target(target, fs, sandbox).await?;
+                let target = destructive_targets
+                    .iter()
+                    .find(|target| target.path() == &path_uri);
+                if let Some(target) = target {
+                    revalidate_destructive_target(target, fs, sandbox).await?;
+                } else {
+                    match fs
+                        .get_metadata(
+                            &path_uri,
+                            GetMetadataOptions {
+                                follow_symlinks: false,
+                            },
+                            sandbox,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            anyhow::bail!(
+                                "apply_patch AddFile would overwrite an existing target without verified destructive authorization: {}",
+                                path_uri.inferred_native_path_string()
+                            );
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 let overwritten_content = read_optional_file_text_for_delta(
                     &path_uri,
                     fs,
@@ -897,7 +924,9 @@ async fn apply_hunks_to_files(
                     &mut delta.exact,
                 )
                 .await;
-                revalidate_destructive_target(target, fs, sandbox).await?;
+                if let Some(target) = target {
+                    revalidate_destructive_target(target, fs, sandbox).await?;
+                }
                 try_write!(
                     write_file_with_missing_parent_retry(
                         fs,
