@@ -11,8 +11,6 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
-use std::ffi::OsStr;
-#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::io::FromRawHandle;
