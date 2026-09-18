@@ -111,6 +111,8 @@ pub struct SandboxExecRequest {
     pub windows_sandbox_private_desktop: bool,
     pub permission_profile: PermissionProfile,
     pub arg0: Option<String>,
+    /// Ephemeral launch-time capability; false means the OS delete fence stays active.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 /// Bundled arguments for sandbox transformation.
@@ -346,6 +348,14 @@ impl SandboxManager {
         &self,
         request: SandboxTransformRequest<'_>,
     ) -> Result<SandboxExecRequest, SandboxTransformError> {
+        self.transform_with_destructive_filesystem_effects(request, false)
+    }
+
+    pub fn transform_with_destructive_filesystem_effects(
+        &self,
+        request: SandboxTransformRequest<'_>,
+        allow_destructive_filesystem_effects: bool,
+    ) -> Result<SandboxExecRequest, SandboxTransformError> {
         let SandboxTransformRequest {
             mut command,
             permissions,
@@ -440,7 +450,7 @@ impl SandboxManager {
                 let (file_system_sandbox_policy, network_sandbox_policy) = pending
                     .effective_permission_profile
                     .to_runtime_permissions();
-                let mut args = create_seatbelt_command_args_with_profile(
+                let mut args = create_seatbelt_command_args_with_delete_fence(
                     CreateSeatbeltCommandArgsParams {
                         command: argv,
                         file_system_sandbox_policy: &file_system_sandbox_policy,
@@ -454,6 +464,7 @@ impl SandboxManager {
                     },
                     self.seatbelt_profile,
                     self.allowed_symlinked_codex_home.as_ref(),
+                    !allow_destructive_filesystem_effects,
                 )
                 .map_err(|err| match err {
                     SeatbeltPreparationError::FileSystem(message) => {
@@ -500,13 +511,14 @@ impl SandboxManager {
                     managed_network.is_some(),
                     is_wsl1(),
                 )?;
-                let mut args = create_linux_sandbox_command_args_for_permission_profile(
+                let mut args = create_linux_sandbox_command_args_for_permission_profile_with_delete_fence(
                     argv,
                     pending.native_command_cwd.as_path(),
                     &pending.effective_permission_profile,
                     pending.native_sandbox_policy_cwd.as_path(),
                     use_legacy_landlock,
                     managed_network.as_ref(),
+                    allow_destructive_filesystem_effects,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
