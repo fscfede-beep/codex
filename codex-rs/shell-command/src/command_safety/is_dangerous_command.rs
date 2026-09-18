@@ -107,10 +107,7 @@ fn is_destructive_delete_command_with_depth(
 }
 
 /// Returns true when stdin text contains a literal destructive filesystem operation.
-pub fn is_destructive_interactive_input(
-    input: &str,
-    platform: DangerousCommandPlatform,
-) -> bool {
+pub fn is_destructive_interactive_input(input: &str, platform: DangerousCommandPlatform) -> bool {
     if input.trim().is_empty() {
         return false;
     }
@@ -132,12 +129,10 @@ pub fn is_destructive_interactive_input(
                 "/c".to_string(),
                 input.to_string(),
             ];
-            is_destructive_delete_command(&powershell)
-                || is_destructive_delete_command(&cmd)
+            is_destructive_delete_command(&powershell) || is_destructive_delete_command(&cmd)
         }
     }
 }
-
 
 fn dangerous_command_match_with_depth(
     command: &[String],
