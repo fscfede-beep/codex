@@ -262,6 +262,33 @@ impl LocalFileSystem {
         self.sandboxed()?.remove(path, options, Some(sandbox)).await
     }
 
+    async fn remove_with_destructive_capability(
+        &self,
+        path: &PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<()> {
+        let sandbox = sandbox.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive filesystem capability requires an explicit scoped sandbox",
+            )
+        })?;
+        sandbox.validate_file_system_paths_for_current_host()?;
+        let policy = sandbox.permissions.file_system_sandbox_policy();
+        if policy.kind != FileSystemSandboxKind::Restricted
+            || !sandbox.should_write_into_sandbox()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "destructive capability requires managed writable sandbox authority",
+            ));
+        }
+        self.sandboxed()?
+            .remove_with_destructive_capability(path, options, Some(sandbox))
+            .await
+    }
+
     async fn copy(
         &self,
         source_path: &PathUri,
