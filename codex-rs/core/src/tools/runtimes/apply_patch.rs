@@ -206,7 +206,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let mut stderr = Vec::new();
         let result = if self.destructive {
             codex_apply_patch::apply_patch_with_destructive_targets(
-            &req.action.patch,
+                &req.action.patch,
             ApplyPatchOptions {
                 update_file_mode: req.action.update_file_mode(),
                 // Only reject links when an otherwise-required sandbox was bypassed.
@@ -223,7 +223,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             &mut stderr,
             fs.as_ref(),
             sandbox.as_ref(),
-            req.action.destructive_targets(),
+                req.action.destructive_targets(),
             )
             .await
         } else {
