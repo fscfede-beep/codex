@@ -161,6 +161,8 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         ),
         prompt_permissions: req.additional_permissions.clone(),
         stopwatch: Stopwatch::unlimited(),
+        allow_unsandboxed_escalation:
+            exec_request.sandbox == SandboxType::None && exec_request.exec_server_sandbox.is_none(),
     };
 
     let escalate_server = EscalateServer::new(
@@ -193,6 +195,9 @@ struct CoreShellActionProvider {
     approval_sandbox_permissions: SandboxPermissions,
     prompt_permissions: Option<AdditionalPermissionProfile>,
     stopwatch: Stopwatch,
+    /// Unsandboxed escalation is allowed only when the outer launch has no local
+    /// sandbox and no executor-managed filesystem sandbox context.
+    allow_unsandboxed_escalation: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -234,7 +239,27 @@ impl CoreShellActionProvider {
         sandbox_permissions: SandboxPermissions,
         permission_profile: &PermissionProfile,
         additional_permissions: Option<&AdditionalPermissionProfile>,
+        allow_unsandboxed_escalation: bool,
     ) -> EscalationExecution {
+        if !allow_unsandboxed_escalation {
+            return match sandbox_permissions {
+                SandboxPermissions::WithAdditionalPermissions => additional_permissions
+                    .map(|_| {
+                        EscalationExecution::Permissions(
+                            EscalationPermissions::ResolvedPermissionProfile(
+                                ResolvedPermissionProfile {
+                                    permission_profile: permission_profile.clone(),
+                                },
+                            ),
+                        )
+                    })
+                    .unwrap_or(EscalationExecution::TurnDefault),
+                SandboxPermissions::UseDefault | SandboxPermissions::RequireEscalated => {
+                    EscalationExecution::TurnDefault
+                }
+            };
+        }
+
         match sandbox_permissions {
             SandboxPermissions::UseDefault => EscalationExecution::TurnDefault,
             SandboxPermissions::RequireEscalated => {
@@ -443,7 +468,8 @@ impl CoreShellActionProvider {
         let decision_driven_by_policy =
             Self::decision_driven_by_policy(&evaluation.matched_rules, evaluation.decision);
         let unsandboxed_allowed =
-            unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy());
+            self.allow_unsandboxed_escalation
+                && unsandboxed_execution_allowed(&self.permission_profile.file_system_sandbox_policy());
         let needs_escalation = match self.sandbox_permissions {
             SandboxPermissions::UseDefault => unsandboxed_allowed && decision_driven_by_policy,
             SandboxPermissions::RequireEscalated => unsandboxed_allowed,
@@ -462,6 +488,7 @@ impl CoreShellActionProvider {
                 self.sandbox_permissions,
                 &self.permission_profile,
                 self.prompt_permissions.as_ref(),
+                self.allow_unsandboxed_escalation,
             ),
         };
         self.process_decision(
