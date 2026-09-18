@@ -1,3 +1,36 @@
+name: P0 V25 focused verification
+
+on:
+  push:
+    branches:
+      - p0/v22-destructive-scope-gate
+  pull_request:
+    branches:
+      - p0/v21-reconciled-review
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
       - name: Formatting
         working-directory: codex-rs
         run: cargo fmt --all -- --check
@@ -21,3 +54,7 @@
       - name: Test process spawn fail-closed gate
         working-directory: codex-rs
         run: cargo test -p codex-app-server process_spawn_is_fail_closed_until_sandboxed
+
+      - name: Test user shell workspace confinement
+        working-directory: codex-rs
+        run: cargo test -p codex-core user_shell_command_cannot_escape_workspace_root
