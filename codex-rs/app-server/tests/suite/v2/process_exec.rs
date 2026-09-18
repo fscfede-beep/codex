@@ -3,7 +3,6 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use codex_app_server_protocol::ProcessSpawnParams;
 use codex_app_server_protocol::RequestId;
-use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -22,7 +21,11 @@ async fn process_spawn_is_fail_closed_until_sandboxed() -> Result<()> {
         .send_process_spawn_request(process_spawn_params(
             "disabled-process".to_string(),
             codex_home.path(),
-            vec!["sh".to_string(), "-lc".to_string(), "true".to_string()],
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "true".to_string(),
+            ],
         )?)
         .await?;
     let error = mcp
@@ -98,7 +101,6 @@ async fn process_kill_cannot_target_disabled_process_spawn() -> Result<()> {
     );
     Ok(())
 }
-
 
 async fn initialized_mcp(codex_home: &Path) -> Result<(MockServer, TestAppServer)> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
