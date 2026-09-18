@@ -53,10 +53,6 @@ jobs:
         working-directory: codex-rs
         run: cargo test -p codex-apply-patch destructive_verification_rejects --lib
 
-      - name: Test destructive apply_patch object identity
-        working-directory: codex-rs
-        run: cargo test -p codex-apply-patch destructive_object_identity --lib
-
       - name: Test apply-patch package
         working-directory: codex-rs
         run: cargo test -p codex-apply-patch --lib
