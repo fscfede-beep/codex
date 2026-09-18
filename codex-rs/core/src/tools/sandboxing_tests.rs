@@ -173,7 +173,12 @@ fn filesystem_safety_fence_narrows_unrestricted_profiles_to_workspace_roots() {
         }
     ));
     let policy = fenced.file_system_sandbox_policy();
-    assert!(policy.can_write_path(&root, &policy.context_for_cwd(&root.to_abs_path().expect("cwd").as_path())));
+    assert!(policy.entries.iter().any(|entry| {
+        matches!(
+            (&entry.path, entry.access),
+            (FileSystemPath::Path { path }, FileSystemAccessMode::Write) if path == &root
+        )
+    }));
 
     assert_eq!(
         filesystem_safety_fence_permission_profile(
