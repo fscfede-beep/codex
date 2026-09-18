@@ -222,6 +222,42 @@ async fn readable_snapshot_does_not_require_stdin_approval() -> anyhow::Result<(
     Ok(())
 }
 
+
+#[test]
+fn destructive_interactive_inputs_are_classified_fail_closed() {
+    use codex_shell_command::DangerousCommandPlatform;
+    use codex_shell_command::is_destructive_interactive_input;
+
+    for input in [
+        "rm -rf -- /tmp/example",
+        "find /tmp/example -delete",
+        "git clean -fdx",
+        "unlink /tmp/example",
+    ] {
+        assert!(
+            is_destructive_interactive_input(input, DangerousCommandPlatform::Posix),
+            "expected destructive input: {input}"
+        );
+    }
+
+    for input in [
+        "Remove-Item -Force C:\\work\\file.txt",
+        "Remove-Item -Recurse C:\\work\\tree",
+        "cmd /d /c del C:\\work\\file.txt",
+        "cmd /d /c rmdir /s C:\\work\\tree",
+    ] {
+        assert!(
+            is_destructive_interactive_input(input, DangerousCommandPlatform::Windows),
+            "expected destructive input: {input}"
+        );
+    }
+
+    assert!(!is_destructive_interactive_input(
+        "printf '%s' rm -rf /tmp/example",
+        DangerousCommandPlatform::Posix,
+    ));
+}
+
 #[test_case::test_case(TerminalSandboxSource::Native, SandboxType::None, SandboxPermissions::RequireEscalated; "native_disabled_sandbox_needs_review_when_enabled")]
 #[test_case::test_case(TerminalSandboxSource::Executor, SandboxType::None, SandboxPermissions::UseDefault; "executor_keeps_its_restricted_token_default")]
 #[test_case::test_case(TerminalSandboxSource::Native, SandboxType::WindowsMxc, SandboxPermissions::UseDefault; "native_mxc_ignores_legacy_level_changes")]
