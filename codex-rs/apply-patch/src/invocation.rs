@@ -586,6 +586,18 @@ mod tests {
         }]
     }
 
+    fn workspace_sandbox(cwd: &PathUri) -> codex_exec_server::FileSystemSandboxContext {
+        codex_exec_server::FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::workspace_write_with_path_uris(
+                std::slice::from_ref(cwd),
+                codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ),
+            cwd.clone(),
+        )
+    }
+
     #[track_caller]
     fn assert_match_args(args: Vec<String>, expected_workdir: Option<&str>) {
         assert_match_args_with_cwd(
@@ -1025,11 +1037,13 @@ PATCH"#,
                 .to_string(),
         ];
 
+        let cwd = PathUri::from_host_native_path(session_dir.path()).expect("absolute test path");
+        let sandbox = workspace_sandbox(&cwd);
         let result = maybe_parse_apply_patch_verified(
             &argv,
-            &PathUri::from_host_native_path(session_dir.path()).expect("absolute test path"),
+            &cwd,
             LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
+            Some(&sandbox),
         )
         .await;
 
@@ -1133,11 +1147,12 @@ PATCH"#,
         ];
 
         for argv in [add_argv, move_argv] {
+            let sandbox = workspace_sandbox(&cwd);
             let result = maybe_parse_apply_patch_verified(
                 &argv,
                 &cwd,
                 LOCAL_FS.as_ref(),
-                /*sandbox*/ None,
+                Some(&sandbox),
             )
             .await;
 
@@ -1162,11 +1177,13 @@ PATCH"#,
             "*** Begin Patch\n*** Delete File: link.txt\n*** End Patch".to_string(),
         ];
 
+        let cwd = PathUri::from_host_native_path(session_dir.path()).expect("absolute test path");
+        let sandbox = workspace_sandbox(&cwd);
         let result = maybe_parse_apply_patch_verified(
             &argv,
-            &PathUri::from_host_native_path(session_dir.path()).expect("absolute test path"),
+            &cwd,
             LOCAL_FS.as_ref(),
-            /*sandbox*/ None,
+            Some(&sandbox),
         )
         .await;
 
