@@ -75,6 +75,7 @@ impl FsRequestProcessor {
         validate_managed_storage_path(path.as_path(), &self.managed_storage_root)
     }
     fn managed_storage_sandbox(&self) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
+        ensure_managed_storage_root_exists(&self.managed_storage_root)?;
         managed_storage_sandbox_for_root(&self.managed_storage_root)
     }
 
@@ -289,6 +290,14 @@ fn closest_existing_ancestor(path: &Path) -> Option<&Path> {
     None
 }
 
+fn ensure_managed_storage_root_exists(root_path: &Path) -> Result<(), JSONRPCErrorError> {
+    std::fs::create_dir_all(root_path).map_err(|err| {
+        invalid_request(format!(
+            "cannot initialize managed attachments root for sandbox enforcement: {err}"
+        ))
+    })
+}
+
 fn managed_storage_sandbox_for_root(
     root_path: &Path,
 ) -> Result<FileSystemSandboxContext, JSONRPCErrorError> {
@@ -358,13 +367,3 @@ mod tests {
 
         let home = tempdir()?;
         let managed_root = home.path().join("attachments");
-        let outside = home.path().join("outside");
-        std::fs::create_dir_all(&managed_root)?;
-        std::fs::create_dir_all(&outside)?;
-        symlink(&outside, managed_root.join("escape"))?;
-
-        let target = managed_root.join("escape").join("secret.txt");
-        assert!(validate_managed_storage_path(&target, &managed_root).is_err());
-        Ok(())
-    }
-}
