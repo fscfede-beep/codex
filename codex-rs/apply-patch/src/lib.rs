@@ -16,6 +16,7 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::GetMetadataOptions;
+use crate::DestructivePatchTargetState;
 use codex_exec_server::FileSystemObjectIdentity;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
@@ -192,7 +193,10 @@ pub enum MaybeApplyPatchVerified {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DestructivePatchTargetState {
     Existing(FileSystemObjectIdentity),
-    MissingParent(FileSystemObjectIdentity),
+    MissingParent {
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    },
 }
 
 /// One concrete target/parent precondition for a destructive patch.
@@ -210,10 +214,14 @@ impl DestructivePatchTarget {
         }
     }
 
-    pub(crate) fn missing_parent(path: PathUri, identity: FileSystemObjectIdentity) -> Self {
+    pub(crate) fn missing_parent(
+        path: PathUri,
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    ) -> Self {
         Self {
             path,
-            state: DestructivePatchTargetState::MissingParent(identity),
+            state: DestructivePatchTargetState::MissingParent { parent, identity },
         }
     }
 
