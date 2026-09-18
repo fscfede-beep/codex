@@ -676,7 +676,8 @@ mod tests {
         ]);
 
         let result =
-            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None).await;
+            maybe_parse_apply_patch_verified(&args, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None)
+                .await;
         assert_matches!(
             result,
             MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ParseError(
