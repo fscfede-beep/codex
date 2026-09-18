@@ -216,7 +216,17 @@ impl FsRequestProcessor {
     }
 }
 
-fn validate_managed_storage_path(path: &Path, managed_root: &Path) -> Result<(), JSONRPCErrorError> {
+fn validate_managed_storage_path(
+    path: &Path,
+    managed_root: &Path,
+) -> Result<(), JSONRPCErrorError> {
+    use std::path::Component;
+
+    if path.components().any(|component| component == Component::ParentDir) {
+        return Err(invalid_request(
+            "filesystem mutation path contains parent traversal",
+        ));
+    }
     if !path.starts_with(managed_root) {
         return Err(invalid_request(
             "filesystem mutation is limited to Codex-managed attachments",
