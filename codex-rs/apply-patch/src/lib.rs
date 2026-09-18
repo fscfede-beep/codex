@@ -16,6 +16,7 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::GetMetadataOptions;
+use codex_exec_server::FileSystemObjectIdentity;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
@@ -187,11 +188,58 @@ pub enum MaybeApplyPatchVerified {
     NotApplyPatch,
 }
 
+/// Expected filesystem state captured while a destructive patch is verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DestructivePatchTargetState {
+    Existing(FileSystemObjectIdentity),
+    MissingParent {
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    },
+}
+
+/// One concrete target/parent precondition for a destructive patch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DestructivePatchTarget {
+    path: PathUri,
+    state: DestructivePatchTargetState,
+}
+
+impl DestructivePatchTarget {
+    pub(crate) fn existing(path: PathUri, identity: FileSystemObjectIdentity) -> Self {
+        Self {
+            path,
+            state: DestructivePatchTargetState::Existing(identity),
+        }
+    }
+
+    pub(crate) fn missing_parent(
+        path: PathUri,
+        parent: PathUri,
+        identity: FileSystemObjectIdentity,
+    ) -> Self {
+        Self {
+            path,
+            state: DestructivePatchTargetState::MissingParent { parent, identity },
+        }
+    }
+
+    pub(crate) fn path(&self) -> &PathUri {
+        &self.path
+    }
+
+    pub(crate) fn state(&self) -> &DestructivePatchTargetState {
+        &self.state
+    }
+}
+
 /// ApplyPatchAction is the result of parsing an `apply_patch` command. By
 /// construction, all paths should be absolute paths.
 #[derive(Debug, PartialEq)]
 pub struct ApplyPatchAction {
     changes: HashMap<PathUri, ApplyPatchFileChange>,
+    destructive_targets: Vec<DestructivePatchTarget>,
+
 
     update_file_mode: ApplyPatchFileUpdateMode,
 
@@ -212,6 +260,10 @@ impl ApplyPatchAction {
     /// Returns the changes that would be made by applying the patch.
     pub fn changes(&self) -> &HashMap<PathUri, ApplyPatchFileChange> {
         &self.changes
+    }
+
+    pub fn destructive_targets(&self) -> &[DestructivePatchTarget] {
+        &self.destructive_targets
     }
 
     /// Returns the update mode selected while the patch was verified.
@@ -253,6 +305,7 @@ impl ApplyPatchAction {
         #[expect(clippy::expect_used)]
         Self {
             changes,
+            destructive_targets: Vec::new(),
             update_file_mode: ApplyPatchFileUpdateMode::default(),
             cwd: path.parent().expect("path should have parent"),
             patch,
