@@ -2530,9 +2530,7 @@ mod tests {
             fresh.iter().all(|option| {
                 !matches!(
                     option.decision,
-                    ApprovalDecision::FileChange(
-                        FileChangeApprovalDecision::AcceptForSession
-                    )
+                    ApprovalDecision::FileChange(FileChangeApprovalDecision::AcceptForSession)
                 )
             }),
             "destructive patch must not expose session persistence"
@@ -2544,9 +2542,7 @@ mod tests {
             normal.iter().any(|option| {
                 matches!(
                     option.decision,
-                    ApprovalDecision::FileChange(
-                        FileChangeApprovalDecision::AcceptForSession
-                    )
+                    ApprovalDecision::FileChange(FileChangeApprovalDecision::AcceptForSession)
                 )
             }),
             "normal patch should retain session approval"
