@@ -1,3 +1,57 @@
+//! Apply Patch runtime: executes verified patches under the orchestrator.
+//!
+//! Assumes `apply_patch` verification/approval happened upstream. Reuses the
+//! selected turn environment filesystem for both local and remote turns, with
+//! sandboxing enforced by the explicit filesystem sandbox context.
+use crate::exec::is_likely_sandbox_denied;
+use crate::session::turn_context::TurnEnvironment;
+use crate::tools::sandboxing::Approvable;
+use crate::tools::sandboxing::ApprovalAction;
+use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::Sandboxable;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolError;
+use crate::tools::sandboxing::ToolRuntime;
+use crate::tools::sandboxing::executor_windows_sandbox_selection;
+use codex_apply_patch::AppliedPatchDelta;
+use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::ApplyPatchOptions;
+use codex_exec_server::FileSystemSandboxContext;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::SandboxErr;
+use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::exec_output::StreamOutput;
+use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::FileChange;
+use codex_sandboxing::SandboxType;
+use codex_sandboxing::SandboxablePreference;
+use codex_sandboxing::is_likely_executor_managed_sandbox_denied;
+use codex_sandboxing::policy_transforms::effective_permission_profile;
+use codex_sandboxing::record_filesystem_sandbox_violation;
+use codex_utils_path_uri::PathUri;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+pub(crate) struct ApplyPatchApprovalKey {
+    pub(crate) environment_id: String,
+    pub(crate) path: PathUri,
+}
+
+#[derive(Debug)]
+pub struct ApplyPatchRequest {
+    pub turn_environment: TurnEnvironment,
+    pub action: ApplyPatchAction,
+    pub file_paths: Vec<PathUri>,
+    pub changes: Arc<std::collections::HashMap<PathBuf, FileChange>>,
+    pub exec_approval_requirement: ExecApprovalRequirement,
+    pub additional_permissions: Option<AdditionalPermissionProfile>,
+    pub permissions_preapproved: bool,
 }
 
 #[derive(Default)]
@@ -161,16 +215,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let mut stderr = Vec::new();
         let result = codex_apply_patch::apply_patch_with_options(
             &req.action.patch,
-            ApplyPatchOptions {
-                update_file_mode: req.action.update_file_mode(),
-                // Only reject links when an otherwise-required sandbox was bypassed.
-                // Executor-managed sandboxes can have SandboxType::None.
-                // Destructive apply_patch was verified without following symlinks.
-                // Keep the execution phase identical: path components and the final entry
-                // must be opened/unlinked with no-follow semantics to avoid a link/reparse
-                // substitution between preflight and mutation.
-                follow_symlinks: !self.destructive,
-            },
+            self.apply_options(&req.action),
             &req.action.cwd,
             &mut stdout,
             &mut stderr,
