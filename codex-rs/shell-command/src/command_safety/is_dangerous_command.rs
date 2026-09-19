@@ -125,6 +125,85 @@ fn is_destructive_filesystem_command_with_depth(
             || windows_dangerous_commands::is_dangerous_powershell_words(command))
 }
 
+fn is_destructive_sudo_command(
+    command: &[String],
+    wrapper_depth: usize,
+    platform: DangerousCommandPlatform,
+) -> bool {
+    let mut index = 1usize;
+    while let Some(arg) = command.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+
+        if matches!(
+            arg.as_str(),
+            "-u" | "--user"
+                | "-g"
+                | "--group"
+                | "-h"
+                | "--host"
+                | "-r"
+                | "--chroot"
+                | "-C"
+                | "--chdir"
+        ) {
+            index += 2;
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            const FLAGS: &[&str] = &[
+                "-A",
+                "-b",
+                "-E",
+                "-H",
+                "-i",
+                "-K",
+                "-k",
+                "-n",
+                "-P",
+                "-S",
+                "-s",
+                "--askpass",
+                "--background",
+                "--preserve-env",
+                "--remove-timestamp",
+                "--reset-timestamp",
+                "--stdin",
+                "--non-interactive",
+                "--shell",
+            ];
+            if FLAGS.contains(&arg.as_str()) {
+                index += 1;
+                continue;
+            }
+
+            let attached_name = arg.split_once('=').map(|(name, _)| name);
+            let attached_value = matches!(
+                attached_name,
+                Some("--user" | "--group" | "--host" | "--chroot" | "--chdir")
+            ) || (arg.starts_with("-u") && arg.len() > 2)
+                || (arg.starts_with("-g") && arg.len() > 2)
+                || (arg.starts_with("-r") && arg.len() > 2);
+            if attached_value {
+                index += 1;
+                continue;
+            }
+
+            return true;
+        }
+
+        return is_destructive_filesystem_command_with_depth(
+            &command[index..],
+            wrapper_depth + 1,
+            platform,
+        );
+    }
+    false
+}
+
 fn is_destructive_command_for_env(
     command: &[String],
     wrapper_depth: usize,
@@ -179,11 +258,7 @@ fn is_destructive_command_for_exec(
                             .is_some_and(|flags| !flags.starts_with('-') && flags.contains('f'))
                 })
         }
-        "sudo" => is_destructive_filesystem_command_with_depth(
-            &command[1..],
-            wrapper_depth + 1,
-            platform,
-        ),
+        "sudo" => is_destructive_sudo_command(command, wrapper_depth, platform),
         "env" => is_destructive_command_for_env(command, wrapper_depth, platform),
         _ => false,
     }
