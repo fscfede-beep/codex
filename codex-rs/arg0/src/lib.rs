@@ -115,6 +115,13 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
         codex_windows_sandbox::run_windows_sandbox_wrapper_main();
     }
     if argv1 == CODEX_CORE_APPLY_PATCH_ARG1 {
+        // This hidden self-dispatch path has no governed approval or sandbox context.
+        // Refuse it rather than allowing an agent-controlled process to mutate the host.
+        eprintln!(
+            "Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a governed Codex runtime; standalone internal dispatch is disabled."
+        );
+        std::process::exit(1);
+        /*
         let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
         let exit_code = match patch_arg {
             Some(patch_arg) => {
@@ -155,6 +162,7 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
             }
         };
         std::process::exit(exit_code);
+        */
     }
 
     // This modifies the environment, which is not thread-safe, so do this
