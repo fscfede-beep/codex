@@ -28,7 +28,6 @@ use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecutorFileSystem;
-use codex_exec_server::RemoveOptions;
 use codex_utils_path_uri::PathUri;
 use std::io;
 use std::sync::Arc;
@@ -155,22 +154,11 @@ impl FsRequestProcessor {
 
     pub(crate) async fn remove(
         &self,
-        params: FsRemoveParams,
+        _params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        let path = PathUri::from_abs_path(&params.path);
-        self.file_system()?
-            .remove(
-                &path,
-                RemoveOptions {
-                    recursive: params.recursive.unwrap_or(true),
-                    force: params.force.unwrap_or(true),
-                    follow_symlinks: true,
-                },
-                /*sandbox*/ None,
-            )
-            .await
-            .map_err(map_fs_error)?;
-        Ok(FsRemoveResponse {})
+        Err(invalid_request(
+            "fs/remove is disabled: this RPC has no scoped deletion capability",
+        ))
     }
 
     pub(crate) async fn copy(

@@ -502,7 +502,7 @@ unsafe fn dacl_has_deny_mask(p_dacl: *mut ACL, scope: DenyAceScope, deny_mask: u
 // its parent. A parent delete-child grant would bypass a direct deny-write ACE
 // on protected children such as `.git` or an explicit read-only subpath.
 const WRITE_ALLOW_MASK: u32 =
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
 unsafe fn dacl_allow_mask_needs_refresh(
     p_dacl: *mut ACL,
@@ -525,7 +525,12 @@ pub fn path_write_aces_need_refresh(path: &Path, psids: &[*mut c_void]) -> Resul
     unsafe {
         let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
         let needs_refresh = psids.iter().any(|psid| {
-            dacl_allow_mask_needs_refresh(p_dacl, *psid, WRITE_ALLOW_MASK, FILE_DELETE_CHILD)
+            dacl_allow_mask_needs_refresh(
+                p_dacl,
+                *psid,
+                WRITE_ALLOW_MASK,
+                DELETE | FILE_DELETE_CHILD,
+            )
         });
         if !p_sd.is_null() {
             LocalFree(p_sd as HLOCAL);
@@ -687,14 +692,18 @@ pub unsafe fn ensure_allow_mask_aces(
 /// # Safety
 /// Caller must pass valid SID pointers and an existing path; free the returned security descriptor with `LocalFree`.
 pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Result<bool> {
-    ensure_allow_mask_aces_with_inheritance_impl(
+    let mut changed = ensure_allow_mask_aces_with_inheritance_impl(
         path,
         sids,
         WRITE_ALLOW_MASK,
-        FILE_DELETE_CHILD,
+        DELETE | FILE_DELETE_CHILD,
         SET_ACCESS,
         CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
-    )
+    )?;
+    for sid in sids {
+        changed |= add_deny_ace(path, *sid, DenyAceKind::Delete)?;
+    }
+    Ok(changed)
 }
 
 /// Adds an allow ACE granting read/write/execute to the given SID on the target path.
@@ -775,6 +784,7 @@ pub unsafe fn add_deny_write_ace(path: &Path, psid: *mut c_void) -> Result<bool>
 enum DenyAceKind {
     Read,
     Write,
+    Delete,
 }
 
 impl DenyAceKind {
@@ -791,6 +801,7 @@ impl DenyAceKind {
                     | DELETE
                     | FILE_DELETE_CHILD
             }
+            Self::Delete => DELETE | FILE_DELETE_CHILD,
         }
     }
 
@@ -798,6 +809,11 @@ impl DenyAceKind {
         match self {
             Self::Read => dacl_has_read_deny_for_sid(p_dacl, psid),
             Self::Write => dacl_has_write_deny_for_sid(p_dacl, psid),
+            Self::Delete => dacl_has_deny_mask(
+                p_dacl,
+                DenyAceScope::EffectiveForSid(psid),
+                DELETE | FILE_DELETE_CHILD,
+            ),
         }
     }
 }
