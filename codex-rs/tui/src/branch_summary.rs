@@ -11,7 +11,7 @@
 //! without blocking the rest of the UI.
 
 #[cfg(test)]
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -547,7 +547,8 @@ mod tests {
                 /*exit_code*/ 1,
                 "",
             ),
-            response(&["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"],
+            response(
+                &["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"],
                 /*exit_code*/ 0,
                 "local-main-sha\n",
             ),
