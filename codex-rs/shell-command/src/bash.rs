@@ -541,6 +541,23 @@ mod tests {
     }
 
     #[test]
+    fn literal_parser_recurses_into_nested_shells() {
+        let command = vec![
+            "zsh".to_string(),
+            "-lc".to_string(),
+            "set -e; bash -lc 'rm -- /tmp/a /tmp/b && ls -la /tmp'; echo done".to_string(),
+        ];
+
+        let parsed = parse_shell_lc_literal_commands(&command).expect("valid shell");
+        assert!(parsed.iter().any(|cmd| cmd == &vec![
+            "rm".to_string(),
+            "--".to_string(),
+            "/tmp/a".to_string(),
+            "/tmp/b".to_string(),
+        ]));
+    }
+
+    #[test]
     fn parse_zsh_lc_plain_commands() {
         let command = vec!["zsh".to_string(), "-lc".to_string(), "ls".to_string()];
         let parsed = parse_shell_lc_plain_commands(&command).unwrap();
