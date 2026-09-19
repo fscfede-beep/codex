@@ -388,6 +388,8 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         // worktree or index, so do not reduce the requested command's timeout.
         let mut command = Command::new(self.git);
         command
+            .env("GIT_ALLOW_PROTOCOL", "")
+            .env("GIT_NO_LAZY_FETCH", "1")
             .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
             .args(args)
             .current_dir(self.cwd);
@@ -415,7 +417,10 @@ pub(crate) async fn run_git_command_with_timeout_from(
     let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        .args(["-c", "core.sshCommand="])
         // Keep internal Git commands independent of repository-selected hooks
         // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
@@ -446,13 +451,12 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
 ///
 /// Preference order:
 /// 1) The symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
-/// 2) `git remote show <remote>` parsed for "HEAD branch: <name>"
-/// 3) Local fallback to existing `main` or `master` if present
+/// 2) Local fallback to existing `main` or `master` if present
+///
+/// The metadata probe is local-only and must not query a configured remote.
 async fn get_default_branch(cwd: &Path) -> Option<String> {
-    // Prefer the first remote (with origin prioritized)
     let remotes = get_git_remotes(cwd).await.unwrap_or_default();
     for remote in remotes {
-        // Try symbolic-ref, which returns something like: refs/remotes/origin/main
         if let Some(symref_output) = run_git_command_with_timeout(
             &[
                 "symbolic-ref",
@@ -466,34 +470,19 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
             && let Ok(sym) = String::from_utf8(symref_output.stdout)
         {
             let trimmed = sym.trim();
-            if let Some((_, name)) = trimmed.rsplit_once('/') {
-                return Some(name.to_string());
-            }
-        }
-
-        // Fall back to parsing `git remote show <remote>` output
-        if let Some(show_output) =
-            run_git_command_with_timeout(&["remote", "show", &remote], cwd).await
-            && show_output.status.success()
-            && let Ok(text) = String::from_utf8(show_output.stdout)
-        {
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("HEAD branch:") {
-                    let name = rest.trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
+            let prefix = format!("refs/remotes/{remote}/");
+            if let Some(name) = trimmed.strip_prefix(&prefix) {
+                if !name.is_empty() {
+                    return Some(name.to_string());
                 }
             }
         }
     }
 
-    // No remote-derived default; try common local defaults if they exist
     get_default_branch_local(cwd).await
 }
 
-/// Determine the repository's default branch name, if available.
+/// Determine the repository's default branch name, if available./// Determine the repository's default branch name, if available.
 ///
 /// This inspects remote configuration first (including the symbolic `HEAD`
 /// reference) and falls back to common local defaults such as `main` or
