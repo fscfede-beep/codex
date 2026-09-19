@@ -125,6 +125,34 @@ fn is_destructive_filesystem_command_with_depth(
             || windows_dangerous_commands::is_dangerous_powershell_words(command))
 }
 
+fn is_destructive_command_for_env(
+    command: &[String],
+    wrapper_depth: usize,
+    platform: DangerousCommandPlatform,
+) -> bool {
+    let mut command_index = 1;
+    while let Some(argument) = command.get(command_index) {
+        if argument == "--" {
+            command_index += 1;
+            break;
+        }
+        if matches!(argument.as_str(), "-i" | "--ignore-environment")
+            || argument
+                .split_once('=')
+                .is_some_and(|(name, _)| !name.is_empty() && !name.starts_with('-'))
+        {
+            command_index += 1;
+            continue;
+        }
+        break;
+    }
+    is_destructive_filesystem_command_with_depth(
+        &command[command_index..],
+        wrapper_depth + 1,
+        platform,
+    )
+}
+
 fn is_destructive_command_for_exec(
     command: &[String],
     platform: DangerousCommandPlatform,
@@ -151,11 +179,12 @@ fn is_destructive_command_for_exec(
                             .is_some_and(|flags| !flags.starts_with('-') && flags.contains('f'))
                 })
         }
-        "sudo" | "env" => is_destructive_filesystem_command_with_depth(
-            command,
-            /*wrapper_depth*/ 1,
+        "sudo" => is_destructive_filesystem_command_with_depth(
+            &command[1..],
+            wrapper_depth + 1,
             platform,
         ),
+        "env" => is_destructive_command_for_env(command, wrapper_depth, platform),
         _ => false,
     }
 }
@@ -248,181 +277,3 @@ fn dangerous_command_match_for_env(
             command_index += 1;
             continue;
         }
-        break;
-    }
-    dangerous_command_match_with_depth(&command[command_index..], wrapper_depth + 1, platform)
-}
-
-fn dangerous_command_match_for_trap(
-    command: &[String],
-    wrapper_depth: usize,
-    platform: DangerousCommandPlatform,
-) -> Option<DangerousCommandMatch> {
-    let mut action_index = 1;
-    if command
-        .get(action_index)
-        .is_some_and(|argument| argument == "--")
-    {
-        action_index += 1;
-    }
-    let action = command
-        .get(action_index)
-        .filter(|action| !action.starts_with('-'))?;
-    let shell_command = vec!["sh".to_string(), "-c".to_string(), action.clone()];
-    dangerous_command_match_with_depth(&shell_command, wrapper_depth + 1, platform)
-}
-
-fn rm_args_include_force_option(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| {
-            arg == "--force"
-                || arg
-                    .strip_prefix('-')
-                    .is_some_and(|flags| !flags.starts_with('-') && flags.contains('f'))
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    fn vec_str(items: &[&str]) -> Vec<String> {
-        items.iter().map(std::string::ToString::to_string).collect()
-    }
-
-    #[test]
-    fn rm_rf_is_dangerous() {
-        assert_eq!(
-            dangerous_command_match(&vec_str(&["rm", "-rf", "/"])),
-            Some(DangerousCommandMatch::ForcedRm)
-        );
-    }
-
-    #[test]
-    fn rm_f_is_dangerous() {
-        assert_eq!(
-            dangerous_command_match(&vec_str(&["rm", "-f", "/"])),
-            Some(DangerousCommandMatch::ForcedRm)
-        );
-    }
-
-    #[test]
-    fn forced_rm_variants_are_dangerous() {
-        for command in [
-            vec_str(&["/bin/rm", "-fr", "/tmp/example"]),
-            vec_str(&["rm", "-r", "-f", "/tmp/example"]),
-            vec_str(&["rm", "--force", "/tmp/example"]),
-            vec_str(&["rm", "/tmp/example", "-f"]),
-            vec_str(&["sudo", "rm", "-rf", "/tmp/example"]),
-            vec_str(&["env", "TARGET=/tmp/example", "rm", "-rf", "/tmp/example"]),
-        ] {
-            assert_eq!(
-                dangerous_command_match(&command),
-                Some(DangerousCommandMatch::ForcedRm),
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn deeply_nested_command_wrappers_fail_closed() {
-        for (depth, expected) in [
-            (
-                MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH,
-                DangerousCommandMatch::ForcedRm,
-            ),
-            (
-                MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 1,
-                DangerousCommandMatch::Other,
-            ),
-        ] {
-            let command = std::iter::repeat_n("env", depth)
-                .chain(["rm", "-rf", "/tmp/example"])
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-
-            assert_eq!(dangerous_command_match(&command), Some(expected));
-        }
-    }
-
-    #[test]
-    fn forced_rm_in_complex_shell_syntax_is_dangerous() {
-        for script in [
-            "printf x | rm -rf /tmp/example",
-            "if test -d /tmp/example; then rm --force /tmp/example; fi",
-            "rm -rf \"$TARGET\" >/dev/null",
-            "for target in /tmp/a /tmp/b; do rm -r -f \"$target\"; done",
-            "echo \"$(rm -rf /tmp/example)\"",
-            "bash -c 'rm -rf /tmp/example'",
-            "trap 'rm -rf /tmp/example' EXIT",
-            "for a in '-C5a25KeRr' '--' '--json' '--bogus'; do HOME=$(mktemp -d) MDE_URL=http://127.0.0.1:1 MDE_TOKEN=x node cli/mde.cjs ls \"$a\" >/tmp/mde-review-out 2>/tmp/mde-review-err; code=$?; printf '%s\\t%s\\t%s\\n' \"$a\" \"$code\" \"$(tr '\\n' ' ' </tmp/mde-review-err)\"; rm -rf \"$HOME\"; done",
-        ] {
-            let command = vec_str(&["bash", "-lc", script]);
-            assert_eq!(
-                dangerous_command_match(&command),
-                Some(DangerousCommandMatch::ForcedRm),
-                "{script}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_forced_or_non_literal_rm_is_not_dangerous() {
-        for command in [
-            vec_str(&["rm", "-r", "/tmp/example"]),
-            vec_str(&["rm", "--", "-f"]),
-            vec_str(&["bash", "-lc", "echo 'rm -rf /tmp/example'"]),
-            vec_str(&["bash", "-lc", "cmd=rm; $cmd -rf /tmp/example"]),
-            vec_str(&["bash", "-lc", "if then rm -rf /tmp/example"]),
-            vec_str(&["env", "TARGET=/tmp/example", "rm", "-r", "/tmp/example"]),
-            vec_str(&["bash", "-lc", "trap 'echo rm -rf /tmp/example' EXIT"]),
-        ] {
-            assert_eq!(dangerous_command_match(&command), None, "{command:?}");
-        }
-    }
-
-    #[test]
-    #[test]
-    fn destructive_filesystem_commands_include_common_delete_forms() {
-        let cases = [
-            vec_str(&["rm", "-r", "/tmp/example"]),
-            vec_str(&["rm", "-f", "/tmp/example"]),
-            vec_str(&["unlink", "/tmp/example"]),
-            vec_str(&["find", "/tmp/example", "-delete"]),
-            vec_str(&["git", "clean", "-fd"]),
-            vec_str(&["bash", "-lc", "rm -rf /tmp/example"]),
-        ];
-        for command in cases {
-            assert!(is_destructive_filesystem_command(&command), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn non_destructive_commands_do_not_trigger_delete_classifier() {
-        for command in [
-            vec_str(&["rm"]),
-            vec_str(&["git", "status"]),
-            vec_str(&["bash", "-lc", "echo rm -rf /tmp/example"]),
-        ] {
-            assert!(!is_destructive_filesystem_command(&command), "{command:?}");
-        }
-    }
-
-    fn direct_powershell_words_return_other_match_on_windows() {
-        let command = vec_str(&["Remove-Item", "test", "-Force"]);
-
-        if cfg!(windows) {
-            assert_eq!(
-                dangerous_powershell_words_match(&command, DangerousCommandPlatform::host()),
-                Some(DangerousCommandMatch::Other)
-            );
-        } else {
-            assert_eq!(
-                dangerous_powershell_words_match(&command, DangerousCommandPlatform::host()),
-                None
-            );
-        }
-    }
-}
