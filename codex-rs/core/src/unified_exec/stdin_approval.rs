@@ -195,15 +195,23 @@ impl ProcessEntry {
         }
 
         let input_is_control_only = input.chars().all(char::is_control);
-        let unsandboxed_terminal = self.policy.sandbox.permissions == PermissionProfile::Disabled
-            || self.launch_permissions.requires_escalated_permissions();
+        let filesystem_is_unrestricted = self
+            .policy
+            .sandbox
+            .permissions
+            .file_system_sandbox_policy()
+            .has_full_disk_write_access_for_convention(self.cwd.infer_path_convention());
+        let unrestricted_terminal = self.policy.sandbox.permissions == PermissionProfile::Disabled
+            || self.launch_permissions.requires_escalated_permissions()
+            || filesystem_is_unrestricted;
 
-        // A terminal launched without a filesystem sandbox is an interactive command channel.
-        // Non-empty text can introduce arbitrary new commands after the original approval.
-        // Require a new command invocation instead of allowing a second unreviewed authority hop.
-        if unsandboxed_terminal && !input_is_control_only {
+        // A terminal with unrestricted filesystem write authority is an interactive command channel.
+        // Non-empty text can introduce arbitrary new commands after the original approval, even
+        // when a network-only sandbox remains active. Require a new command invocation so the full
+        // command can be reviewed under fresh execution policy.
+        if unrestricted_terminal && !input_is_control_only {
             return Err(approval_error(
-                "non-empty input to an unsandboxed terminal is disabled; start a new terminal so the full command can be reviewed",
+                "non-empty input to an unrestricted terminal is disabled; start a new terminal so the full command can be reviewed",
             ));
         }
 
