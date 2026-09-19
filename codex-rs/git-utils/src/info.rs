@@ -422,6 +422,8 @@ pub(crate) async fn run_git_command_with_timeout_from(
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "core.sshCommand")
         .env("GIT_CONFIG_VALUE_0", "")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(args)
         .current_dir(cwd);
     run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await
