@@ -416,12 +416,10 @@ pub(crate) async fn run_git_command_with_timeout_from(
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        .args(["-c", "core.sshCommand="])
         // Keep internal Git commands independent of repository-selected helpers.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
         .args(["-c", fsmonitor.git_config_arg()])
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "core.sshCommand")
-        .env("GIT_CONFIG_VALUE_0", "")
         .env("GIT_ALLOW_PROTOCOL", "")
         .env("GIT_NO_LAZY_FETCH", "1")
         .args(args)
