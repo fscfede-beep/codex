@@ -239,13 +239,17 @@ async fn run_git_command(
         fsmonitor.git_config_arg(),
         "-c",
         DISABLE_HOOKS_CONFIG,
+        "-c",
+        "core.sshCommand=",
     ]
     .into_iter()
     .chain(args.iter().copied());
     let mut command = WorkspaceCommand::new(argv)
         .cwd(cwd.to_path_buf())
         .timeout(DIFF_COMMAND_TIMEOUT)
-        .disable_output_cap();
+        .disable_output_cap()
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1");
     if !config_overrides.is_empty() {
         command = command.env("GIT_CONFIG_COUNT", config_overrides.len().to_string());
         for (index, (key, value)) in config_overrides.iter().enumerate() {
