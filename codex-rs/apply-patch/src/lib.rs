@@ -209,6 +209,22 @@ impl ApplyPatchAction {
         self.changes.is_empty()
     }
 
+    /// Whether the patch contains a file-system mutation that must not be
+    /// treated as an ordinary write.
+    pub fn is_destructive(&self) -> bool {
+        self.changes.values().any(|change| {
+            matches!(
+                change,
+                ApplyPatchFileChange::Add { .. }
+                    | ApplyPatchFileChange::Delete { .. }
+                    | ApplyPatchFileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    }
+
     /// Returns the changes that would be made by applying the patch.
     pub fn changes(&self) -> &HashMap<PathUri, ApplyPatchFileChange> {
         &self.changes
