@@ -452,8 +452,7 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
 ///
 /// Preference order:
 /// 1) The symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
-/// 2) `git remote show <remote>` parsed for "HEAD branch: <name>"
-/// 3) Local fallback to existing `main` or `master` if present
+/// 2) Local fallback to existing `main` or `master` if present
 async fn get_default_branch(cwd: &Path) -> Option<String> {
     // Prefer the first remote (with origin prioritized)
     let remotes = get_git_remotes(cwd).await.unwrap_or_default();
