@@ -94,10 +94,19 @@ impl ApplyPatchRuntime {
             return None;
         }
 
-        let permissions = effective_permission_profile(
-            attempt.exec_server_permissions,
-            req.additional_permissions.as_ref(),
-        );
+        let permissions = if req.action.is_destructive() {
+            PermissionProfile::workspace_write_with_path_uris(
+                attempt.workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            effective_permission_profile(
+                attempt.exec_server_permissions,
+                req.additional_permissions.as_ref(),
+            )
+        };
         Some(FileSystemSandboxContext {
             permissions,
             cwd: attempt.sandbox_cwd.clone(),
