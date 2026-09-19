@@ -36,6 +36,7 @@ use tracing::instrument;
 use crate::config::Config;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::sandboxing::ExecApprovalRequirement;
+use codex_shell_command::bash::parse_shell_lc_literal_commands;
 use codex_shell_command::bash::parse_shell_lc_plain_commands;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use shlex::try_join as shlex_try_join;
@@ -372,11 +373,31 @@ impl ExecPolicyManager {
         let match_options = MatchOptions {
             resolve_host_executables: true,
         };
-        let evaluation = exec_policy.check_multiple_with_options(
+        let mut evaluation = exec_policy.check_multiple_with_options(
             commands.iter(),
             &exec_policy_fallback,
             &match_options,
         );
+
+        // Complex shell scripts are intentionally not reduced to allow decisions
+        // from partial static parsing. We only use literal command extraction as
+        // a one-way safety check: restrictive managed rules discovered inside an
+        // otherwise opaque script can still force Prompt/Forbidden.
+        if commands.len() == 1 && commands[0] == command {
+            let extra_matches =
+                restrictive_literal_policy_matches(exec_policy.as_ref(), command, &match_options);
+            if !extra_matches.is_empty() {
+                evaluation.decision = std::cmp::max(
+                    evaluation.decision,
+                    extra_matches
+                        .iter()
+                        .map(RuleMatch::decision)
+                        .max()
+                        .expect("non-empty restrictive literal matches"),
+                );
+                evaluation.matched_rules.extend(extra_matches);
+            }
+        }
 
         let requested_amendment = if auto_amendment_allowed {
             derive_requested_execpolicy_amendment_from_prefix_rule(
@@ -901,6 +922,34 @@ fn commands_for_exec_policy_for_platform(
         commands: vec![command.to_vec()],
         command_origin: ExecPolicyCommandOrigin::Generic,
     }
+}
+
+fn restrictive_literal_policy_matches(
+    policy: &Policy,
+    command: &[String],
+    options: &MatchOptions,
+) -> Vec<RuleMatch> {
+    let Some(literal_commands) = parse_shell_lc_literal_commands(command) else {
+        return Vec::new();
+    };
+
+    literal_commands
+        .into_iter()
+        .flat_map(|command| {
+            policy.matches_for_command_with_options(
+                &command,
+                /*heuristics_fallback*/ None,
+                options,
+            )
+        })
+        .filter(|rule_match| {
+            is_policy_match(rule_match)
+                && matches!(
+                    rule_match.decision(),
+                    Decision::Prompt | Decision::Forbidden
+                )
+        })
+        .collect()
 }
 
 /// Derive a proposed execpolicy amendment when a command requires user approval
