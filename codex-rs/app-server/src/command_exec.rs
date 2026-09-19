@@ -228,6 +228,13 @@ impl CommandExecManager {
             return Ok(());
         }
 
+        // This legacy direct-PTY boundary has no request-scoped capability channel.
+        // Refuse it rather than interpreting an ExecRequest profile as authorization.
+        return Err(invalid_request(
+            "command/exec direct PTY backend is disabled: use the governed execution path",
+        ));
+
+        #[allow(unreachable_code)]
         let ExecRequest {
             command,
             cwd,
