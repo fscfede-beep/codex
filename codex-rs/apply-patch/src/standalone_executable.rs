@@ -46,6 +46,25 @@ pub fn run_main() -> i32 {
         return 2;
     }
 
+    if let Ok(parsed) = crate::parse_patch(&patch_arg)
+        && parsed.hunks.iter().any(|hunk| {
+            matches!(
+                hunk,
+                crate::Hunk::AddFile { .. }
+                    | crate::Hunk::DeleteFile { .. }
+                    | crate::Hunk::UpdateFile {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    {
+        eprintln!(
+            "Error: destructive apply_patch requires the governed Codex approval and sandbox path."
+        );
+        return 1;
+    }
+
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
