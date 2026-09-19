@@ -226,10 +226,6 @@ async fn get_default_branch(
             return Some(branch);
         }
 
-        if let Some(branch) = get_remote_default_branch_from_remote_show(runner, cwd, &remote).await
-        {
-            return Some(branch);
-        }
     }
 
     get_default_branch_local(runner, cwd).await
@@ -474,16 +470,20 @@ async fn run_git_command(
     cwd: &Path,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
-    let mut argv = Vec::with_capacity(args.len() + 3);
+    let mut argv = Vec::with_capacity(args.len() + 5);
     argv.push("git".to_string());
     argv.push("-c".to_string());
     argv.push(codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string());
+    argv.push("-c".to_string());
+    argv.push("core.sshCommand=".to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_ALLOW_PROTOCOL", "")
+                .env("GIT_NO_LAZY_FETCH", "1"),
         )
         .await
 }
@@ -673,7 +673,7 @@ mod tests {
         );
     }
 
-    fn response(argv: &[&str], exit_code: i32, stdout: &str) -> FakeResponse {
+    fn command(argv: &[&str]) -> Vec<String> {
         let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
         if argv.first().map(String::as_str) == Some("git") {
             argv.splice(
@@ -681,9 +681,16 @@ mod tests {
                 [
                     "-c".to_string(),
                     codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
                 ],
             );
         }
+        argv
+    }
+
+    fn response(argv: &[&str], exit_code: i32, stdout: &str) -> FakeResponse {
+        let argv = command(argv);
         FakeResponse {
             argv,
             output: WorkspaceCommandOutput {
@@ -713,16 +720,7 @@ mod tests {
         }
 
         fn saw(&self, argv: &[&str]) -> bool {
-            let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
-            if argv.first().map(String::as_str) == Some("git") {
-                argv.splice(
-                    1..1,
-                    [
-                        "-c".to_string(),
-                        codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
-                    ],
-                );
-            }
+            let argv = command(argv);
             self.seen
                 .lock()
                 .expect("seen lock")
