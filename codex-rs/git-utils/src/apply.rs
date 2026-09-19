@@ -127,7 +127,10 @@ pub fn apply_git_patch(req: &ApplyGitRequest) -> io::Result<ApplyGitResult> {
 fn resolve_git_root(cwd: &Path) -> io::Result<PathBuf> {
     let mut command = std::process::Command::new("git");
     command
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        .args(["-c", "core.sshCommand="])
         .arg("rev-parse")
         .arg("--show-toplevel")
         .current_dir(cwd);
@@ -154,10 +157,15 @@ fn write_temp_patch(diff: &str) -> io::Result<(tempfile::TempDir, PathBuf)> {
 
 fn run_git(cwd: &Path, git_cfg: &[String], args: &[String]) -> io::Result<(i32, String, String)> {
     let mut cmd = std::process::Command::new("git");
+    cmd
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1");
     for p in git_cfg {
         cmd.arg(p);
     }
     cmd.args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG]);
+    // Keep the local-only invariant after caller-supplied config.
+    cmd.args(["-c", "core.sshCommand="]);
     for a in args {
         cmd.arg(a);
     }
@@ -336,7 +344,11 @@ pub fn stage_paths(git_root: &Path, diff: &str) -> io::Result<()> {
         return Ok(());
     }
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG]);
+    cmd
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        .args(["-c", "core.sshCommand="]);
     cmd.arg("add");
     cmd.arg("--");
     for p in &existing {
