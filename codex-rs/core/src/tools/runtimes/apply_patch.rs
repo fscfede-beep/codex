@@ -171,6 +171,11 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         attempt: &SandboxAttempt<'_>,
         _ctx: &ToolCtx,
     ) -> Result<ApplyPatchRuntimeOutput, ToolError> {
+        if !attempt.sandbox_requested || attempt.sandbox == SandboxType::None {
+            return Err(ToolError::Rejected(
+                "apply_patch requires an enforceable sandbox".to_string(),
+            ));
+        }
         let started_at = Instant::now();
         let fs = req.turn_environment.environment.get_filesystem();
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
