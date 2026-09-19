@@ -69,7 +69,12 @@ impl WorkspaceCommand {
         if command.argv.first().map(String::as_str) == Some("git") {
             command.argv.splice(
                 1..1,
-                ["-c".to_string(), "core.sshCommand=".to_string()],
+                [
+                    "-c".to_string(),
+                    codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
+                ],
             );
         }
         for (key, value) in codex_git_utils::local_only_git_env() {
