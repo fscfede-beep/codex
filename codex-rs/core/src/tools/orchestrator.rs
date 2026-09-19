@@ -98,6 +98,7 @@ impl ToolOrchestrator {
             network_proxy: network_approval
                 .as_ref()
                 .map(ActiveNetworkApproval::execution_proxy),
+            allow_destructive_filesystem_effects: attempt.allow_destructive_filesystem_effects,
         };
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
@@ -317,6 +318,7 @@ impl ToolOrchestrator {
             windows_sandbox_level: sandbox_config.windows_sandbox_level,
             network_denial_cancellation_token: None,
             network_proxy: None,
+            allow_destructive_filesystem_effects: tool.allow_destructive_filesystem_effects(req, already_approved),
         };
 
         let initial_attempt_start = Instant::now();
@@ -491,6 +493,7 @@ impl ToolOrchestrator {
                     windows_sandbox_level: sandbox_config.windows_sandbox_level,
                     network_denial_cancellation_token: None,
                     network_proxy: None,
+                    allow_destructive_filesystem_effects: tool.allow_destructive_filesystem_effects(req, already_approved),
                 };
 
                 // Second attempt.
