@@ -499,6 +499,20 @@ impl Session {
         // Stdin that exceeds current permissions needs a fresh sandbox approval.
         // Strict review of ordinary input follows the same routing as ordinary exec.
         let policy = ctx.review_context.turn().approval_policy();
+
+        // Destructive ApplyPatch is a human-only capability. Do not allow hooks,
+        // Guardian, session cache, or preapproved flags to authorize it.
+        if is_destructive_apply_patch_action(&action) {
+            let resolution = ApprovalResolution {
+                decision: normalize_destructive_review_decision(
+                    self.request_user_approval(&action, &ctx).await,
+                ),
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
+
         if matches!(&action, ApprovalAction::WriteStdin { sandbox_permissions, .. }
             if sandbox_permissions.requests_sandbox_override())
             && !(ctx.strict_auto_review && matches!(policy, AskForApproval::Never))
