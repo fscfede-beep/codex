@@ -503,7 +503,13 @@ impl SessionConfiguration {
                         network_sandbox_policy,
                     ),
                 )?;
-        } else if cwd_changed && file_system_policy_has_rebindable_project_root_write {
+        } else if cwd_changed
+            && file_system_policy_has_rebindable_project_root_write
+            && self
+                .active_permission_profile()
+                .as_ref()
+                .is_none_or(|profile| profile.id.starts_with(':'))
+        {
             // Compatibility projection can resolve filesystem paths. Only compute it
             // when a cwd-bound legacy policy might need rebinding.
             let current_sandbox_policy = self.sandbox_policy(current_environments);
