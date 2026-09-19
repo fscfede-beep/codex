@@ -362,6 +362,17 @@ pub(crate) enum ToolError {
 }
 
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
+    /// Allows a runtime to narrow the permission profile used for this request.
+    /// Implementations must never widen ambient authority.
+    fn permission_profile_for_attempt(
+        &self,
+        _req: &Req,
+        base: &codex_protocol::models::PermissionProfile,
+        _workspace_roots: &[PathUri],
+    ) -> codex_protocol::models::PermissionProfile {
+        base.clone()
+    }
+
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
