@@ -386,3 +386,4 @@ fn destructive_patch_execution_disables_symlink_following() {
     assert!(action.is_destructive());
     assert!(!runtime.destructive);
 }
+
