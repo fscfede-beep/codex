@@ -64,6 +64,34 @@ fn existing_deny_ace_is_visible_without_write_dac() {
 }
 
 #[test]
+fn delete_deny_ace_is_visible_and_distinct_from_write_allow() {
+    let target = tempfile::NamedTempFile::new().expect("temporary file");
+    let sid = LocalSid::from_string("S-1-5-21-10-20-30-42").expect("test SID");
+    let path = target.path();
+    let psid = sid.as_ptr();
+
+    assert!(unsafe { super::ensure_allow_write_aces(path, &[psid]) }.expect("write allow ACE"));
+    assert!(unsafe { super::add_deny_delete_ace(path, psid) }.expect("delete deny ACE"));
+    let already_present = unsafe {
+        deny_ace_already_present(target.as_file(), path, psid, super::DenyAceKind::Delete)
+    }
+    .expect("delete deny ACE should be detectable");
+    assert!(already_present);
+    unsafe {
+        let (dacl, descriptor) = super::fetch_dacl_handle(path).expect("fetch test DACL");
+        assert!(!super::dacl_mask_allows(
+            dacl,
+            &[psid],
+            windows_sys::Win32::Storage::FileSystem::DELETE,
+            true,
+        ));
+        if !descriptor.is_null() {
+            LocalFree(descriptor as HLOCAL);
+        }
+    }
+}
+
+#[test]
 fn revoking_absent_sid_preserves_child_null_dacl() {
     let parent = tempfile::tempdir().expect("parent directory");
     let child = parent.path().join("child");
