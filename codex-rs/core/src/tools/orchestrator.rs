@@ -263,6 +263,13 @@ impl ToolOrchestrator {
             turn_ctx.network.is_some()
         };
         let sandbox_preference = tool.sandbox_preference_for_request(req);
+        // A runtime that explicitly requires a sandbox cannot have that requirement
+        // overridden by an approval-level bypass flag.
+        let sandbox_override = if sandbox_preference == SandboxablePreference::Require {
+            SandboxOverride::NoOverride
+        } else {
+            sandbox_override
+        };
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
