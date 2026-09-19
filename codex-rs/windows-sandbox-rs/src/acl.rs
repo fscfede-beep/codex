@@ -502,7 +502,7 @@ unsafe fn dacl_has_deny_mask(p_dacl: *mut ACL, scope: DenyAceScope, deny_mask: u
 // its parent. A parent delete-child grant would bypass a direct deny-write ACE
 // on protected children such as `.git` or an explicit read-only subpath.
 const WRITE_ALLOW_MASK: u32 =
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
 unsafe fn dacl_allow_mask_needs_refresh(
     p_dacl: *mut ACL,
@@ -525,7 +525,12 @@ pub fn path_write_aces_need_refresh(path: &Path, psids: &[*mut c_void]) -> Resul
     unsafe {
         let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
         let needs_refresh = psids.iter().any(|psid| {
-            dacl_allow_mask_needs_refresh(p_dacl, *psid, WRITE_ALLOW_MASK, FILE_DELETE_CHILD)
+            dacl_allow_mask_needs_refresh(
+                p_dacl,
+                *psid,
+                WRITE_ALLOW_MASK,
+                DELETE | FILE_DELETE_CHILD,
+            )
         });
         if !p_sd.is_null() {
             LocalFree(p_sd as HLOCAL);
@@ -691,7 +696,7 @@ pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Resu
         path,
         sids,
         WRITE_ALLOW_MASK,
-        FILE_DELETE_CHILD,
+        DELETE | FILE_DELETE_CHILD,
         SET_ACCESS,
         CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
     )
