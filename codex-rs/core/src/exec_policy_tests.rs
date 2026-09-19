@@ -684,7 +684,7 @@ async fn complex_shell_script_honors_restrictive_inner_rule() {
     let command = vec![
         "zsh".to_string(),
         "-lc".to_string(),
-        r#"set -e; target=/tmp/work; if test -e "$target"; then rm -- "$target"; fi"#.to_string(),
+        r#"set -e; target=/tmp/work; if test -e "$target"; then /bin/rm -- "$target"; fi"#.to_string(),
     ];
 
     let requirement = exec_approval_requirement_for_command(ExecApprovalRequirementScenario {
