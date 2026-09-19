@@ -472,6 +472,7 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
                 return Some(name.to_string());
             }
         }
+    }
 
     // No remote-derived default; try common local defaults if they exist
     get_default_branch_local(cwd).await
