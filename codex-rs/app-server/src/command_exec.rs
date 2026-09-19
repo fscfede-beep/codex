@@ -235,94 +235,9 @@ impl CommandExecManager {
         ));
 
         #[allow(unreachable_code)]
-        let ExecRequest {
-            command,
-            cwd,
-            env,
-            expiration,
-            sandbox: _sandbox,
-            arg0,
-            ..
-        } = exec_request;
-        // TODO(anp): Keep PathUri through the local command launch boundary.
-        let cwd = cwd
-            .to_abs_path()
-            .map_err(|err| invalid_request(format!("invalid command cwd: {err}")))?;
-
-        let stream_stdin = tty || stream_stdin;
-        let stream_stdout_stderr = tty || stream_stdout_stderr;
-        let (control_tx, control_rx) = mpsc::channel(32);
-        let notification_process_id = match &process_id {
-            InternalProcessId::Generated(_) => None,
-            InternalProcessId::Client(process_id) => Some(process_id.clone()),
-        };
-
-        let sessions = Arc::clone(&self.sessions);
-        let (program, args) = command
-            .split_first()
-            .ok_or_else(|| invalid_request("command must not be empty"))?;
-        {
-            let mut sessions = self.sessions.lock().await;
-            if sessions.contains_key(&process_key) {
-                return Err(invalid_request(format!(
-                    "duplicate active command/exec process id: {}",
-                    process_key.process_id.error_repr(),
-                )));
-            }
-            sessions.insert(
-                process_key.clone(),
-                CommandExecSession::Active { control_tx },
-            );
-        }
-        let spawned = if tty {
-            codex_utils_pty::spawn_pty_process(
-                program,
-                args,
-                cwd.as_path(),
-                &env,
-                &arg0,
-                size.unwrap_or_default(),
-                &[],
-            )
-            .await
-        } else if stream_stdin {
-            codex_utils_pty::spawn_pipe_process(program, args, cwd.as_path(), &env, &arg0, &[])
-                .await
-        } else {
-            codex_utils_pty::spawn_pipe_process_no_stdin(
-                program,
-                args,
-                cwd.as_path(),
-                &env,
-                &arg0,
-                &[],
-            )
-            .await
-        };
-        let spawned = match spawned {
-            Ok(spawned) => spawned,
-            Err(err) => {
-                self.sessions.lock().await.remove(&process_key);
-                return Err(internal_error(format!("failed to spawn command: {err}")));
-            }
-        };
-        tokio::spawn(async move {
-            let _started_network_proxy = started_network_proxy;
-            run_command(RunCommandParams {
-                outgoing,
-                request_id: request_id.clone(),
-                process_id: notification_process_id,
-                spawned,
-                control_rx,
-                stream_stdin,
-                stream_stdout_stderr,
-                expiration,
-                output_bytes_cap,
-            })
-            .await;
-            sessions.lock().await.remove(&process_key);
-        });
-        Ok(())
+        return Err(invalid_request(
+            "command/exec direct PTY backend is disabled: use the governed execution path",
+        ));
     }
 
     pub(crate) async fn write(
