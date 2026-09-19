@@ -233,10 +233,24 @@ impl CommandExecManager {
             cwd,
             env,
             expiration,
-            sandbox: _sandbox,
+            sandbox,
+            permission_profile,
             arg0,
             ..
         } = exec_request;
+
+        // The direct PTY backend cannot enforce a managed or external filesystem
+        // sandbox. Never discard the ExecRequest sandbox contract.
+        if sandbox != SandboxType::None
+            || !matches!(
+                permission_profile,
+                codex_protocol::models::PermissionProfile::Disabled
+            )
+        {
+            return Err(invalid_request(
+                "command/exec cannot use the direct PTY backend without explicit full-access authority; sandboxed execution requires a governed sandbox spawn path",
+            ));
+        }
         // TODO(anp): Keep PathUri through the local command launch boundary.
         let cwd = cwd
             .to_abs_path()
