@@ -12,7 +12,6 @@ use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
 use crate::GetMetadataOptions;
 use crate::ReadFileOptions;
-use crate::RemoveOptions;
 use crate::WriteFileOptions;
 use crate::file_read::FileReadHandleManager;
 use crate::local_file_system::LocalFileSystem;
