@@ -214,6 +214,18 @@ impl ApplyPatchAction {
         &self.changes
     }
 
+    /// True when applying this patch can remove an existing filesystem object.
+    ///
+    /// DeleteFile removes an existing file. UpdateFile with move_path also
+    /// removes the original path after writing the destination.
+    pub fn contains_destructive_effects(&self) -> bool {
+        self.changes.values().any(|change| match change {
+            ApplyPatchFileChange::Delete { .. } => true,
+            ApplyPatchFileChange::Update { move_path, .. } => move_path.is_some(),
+            ApplyPatchFileChange::Add { .. } => false,
+        })
+    }
+
     /// Returns the update mode selected while the patch was verified.
     pub fn update_file_mode(&self) -> ApplyPatchFileUpdateMode {
         self.update_file_mode
