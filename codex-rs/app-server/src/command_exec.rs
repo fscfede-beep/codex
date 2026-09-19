@@ -233,11 +233,6 @@ impl CommandExecManager {
         return Err(invalid_request(
             "command/exec direct PTY backend is disabled: use the governed execution path",
         ));
-
-        #[allow(unreachable_code)]
-        return Err(invalid_request(
-            "command/exec direct PTY backend is disabled: use the governed execution path",
-        ));
     }
 
     pub(crate) async fn write(
