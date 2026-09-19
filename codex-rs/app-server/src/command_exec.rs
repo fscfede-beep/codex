@@ -770,6 +770,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn direct_pty_full_access_execution_fails_closed() {
+        let (tx, _rx) = mpsc::channel(1);
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(14),
+            request_id: codex_app_server_protocol::RequestId::Integer(4),
+        };
+        let cwd = AbsolutePathBuf::current_dir().expect("current dir");
+
+        let err = manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id,
+                process_id: Some("proc-14".to_string()),
+                exec_request: ExecRequest::new(
+                    vec!["not-a-real-program".to_string()],
+                    cwd.clone(),
+                    HashMap::new(),
+                    /*network*/ None,
+                    /*network_environment_id*/ None,
+                    ExecExpiration::DefaultTimeout,
+                    codex_core::exec::ExecCapturePolicy::ShellTool,
+                    SandboxType::None,
+                    vec![cwd],
+                    WindowsSandboxLevel::Disabled,
+                    PermissionProfile::Disabled,
+                    /*arg0*/ None,
+                ),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(DEFAULT_OUTPUT_BYTES_CAP),
+                size: None,
+            })
+            .await
+            .expect_err("unmediated full-access direct PTY execution must fail closed");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(
+            err.message,
+            "command/exec direct PTY execution is disabled without a governed sandbox capability"
+        );
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn windows_sandbox_non_streaming_exec_uses_execution_path() {
