@@ -7,6 +7,15 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+use tokio::io;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
@@ -43,15 +52,6 @@ use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
 use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::LazyLock;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-use tokio::io;
-use tokio::io::AsyncReadExt;
-use tokio_util::io::ReaderStream;
-use tokio_util::sync::CancellationToken;
 
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
@@ -1473,7 +1473,10 @@ mod tests {
                 Some(&sandbox),
             )
             .await;
-        assert_eq!(result.map_err(|err| err.kind()), Err(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            result.map_err(|err| err.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
         assert_eq!(std::fs::read_to_string(&target)?, "protected");
         Ok(())
     }
@@ -1628,3 +1631,4 @@ mod walk_tests {
         Ok(())
     }
 }
+
