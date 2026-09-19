@@ -258,7 +258,9 @@ fn moving_apply_patch_requires_fresh_human_approval() {
             move_path: Some(PathBuf::from("new.txt")),
         },
     )]));
-    assert!(ApprovalAction::apply_patch_requires_fresh_human_approval(&changes));
+    assert!(ApprovalAction::apply_patch_requires_fresh_human_approval(
+        &changes
+    ));
 }
 
 #[test]
@@ -306,7 +308,8 @@ fn destructive_apply_patch_disables_session_cache() {
         files: vec![PathUri::parse("file:///tmp/delete.txt").expect("path")],
         patch: "*** Begin Patch
 *** Delete File: delete.txt
-*** End Patch".to_string(),
+*** End Patch"
+            .to_string(),
         changes,
         permissions_preapproved: true,
     };
