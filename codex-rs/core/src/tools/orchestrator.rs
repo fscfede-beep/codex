@@ -266,7 +266,10 @@ impl ToolOrchestrator {
         } else {
             turn_ctx.network.is_some()
         };
-        let sandbox_preference = tool.sandbox_preference();
+        let sandbox_preference =
+            tool.sandbox_preference_for_attempt(req, tool.sandbox_preference());
+        let allow_escalation =
+            tool.escalate_on_failure_for_attempt(req, tool.escalate_on_failure());
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
@@ -363,7 +366,7 @@ impl ToolOrchestrator {
                     );
                     return Err(ToolError::Codex(err));
                 }
-                if !tool.escalate_on_failure() {
+                if !allow_escalation {
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,
