@@ -789,6 +789,21 @@ async fn apply_hunks_with_options_and_destructive_targets(
     }
 }
 
+fn reject_destructive_hunks(hunks: &[Hunk]) -> Result<(), ApplyPatchFailure> {
+    if hunks.iter().any(hunk_is_destructive) {
+        return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(
+            IoError {
+                context: "ungoverned apply_patch API".to_string(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "destructive apply_patch requires the governed object-identity API",
+                ),
+            },
+        )));
+    }
+    Ok(())
+}
+
 /// Applies hunks and continues to update stdout/stderr
 pub async fn apply_hunks(
     hunks: &[Hunk],
@@ -821,6 +836,8 @@ async fn apply_hunks_with_options(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    reject_destructive_hunks(hunks)?;
+
     let mut delta = AppliedPatchDelta::empty();
     match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &[], &mut delta).await {
         Ok(affected_paths) => {
@@ -2001,4 +2018,33 @@ mod tests {
         }
         assert!(!nested.exists());
     }
+    #[tokio::test]
+    async fn generic_apply_patch_rejects_destructive_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("victim.txt");
+        std::fs::write(&target, "must survive\n").unwrap();
+        let patch = wrap_patch("*** Delete File: victim.txt");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute test path");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let error = apply_patch(
+            &patch,
+            &cwd,
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .expect_err("generic apply_patch API must reject destructive changes");
+
+        assert!(
+            format!("{error}")
+                .contains("destructive apply_patch requires the governed object-identity API")
+        );
+        assert!(target.exists());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "must survive\n");
+    }
+
 }
