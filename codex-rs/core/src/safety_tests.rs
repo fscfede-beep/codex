@@ -166,7 +166,7 @@ fn test_writable_roots_constraint() {
 }
 
 #[test]
-fn external_sandbox_auto_approves_in_on_request() {
+fn external_sandbox_rejects_destructive_on_request_without_enforcement() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().abs();
     let cwd_uri = PathUri::from_abs_path(&cwd);
@@ -191,7 +191,7 @@ fn external_sandbox_auto_approves_in_on_request() {
             PatchSandboxRoute::Platform(WindowsSandboxLevel::Disabled)
         ),
         SafetyCheck::Reject {
-            reason: "destructive apply_patch requires a fresh human approval".to_string(),
+            reason: "destructive apply_patch requires an enforceable sandbox".to_string(),
         }
     );
 }
