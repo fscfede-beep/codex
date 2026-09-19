@@ -447,7 +447,9 @@ async fn run_git_command(
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_ALLOW_PROTOCOL", "")
+                .env("GIT_NO_LAZY_FETCH", "1"),
         )
         .await
 }
