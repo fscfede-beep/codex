@@ -474,10 +474,12 @@ async fn run_git_command(
     cwd: &Path,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
-    let mut argv = Vec::with_capacity(args.len() + 3);
+    let mut argv = Vec::with_capacity(args.len() + 5);
     argv.push("git".to_string());
     argv.push("-c".to_string());
     argv.push(codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string());
+    argv.push("-c".to_string());
+    argv.push("core.sshCommand=".to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
