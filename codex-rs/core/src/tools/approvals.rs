@@ -839,15 +839,7 @@ impl Session {
                     .retry_reason
                     .clone()
                     .or_else(|| ctx.approval_reason.clone());
-                if is_destructive_apply_patch_action(&ApprovalAction::ApplyPatch {
-                    id: ctx.call_id.clone(),
-                    environment_id: String::new(),
-                    cwd: ctx.review_context.turn().cwd().clone(),
-                    files: changes.keys().cloned().collect(),
-                    patch: String::new(),
-                    changes: changes.clone(),
-                    permissions_preapproved: *permissions_preapproved,
-                }) {
+                if apply_patch_changes_are_destructive(changes.as_ref()) {
                     return normalize_destructive_review_decision(
                         self.request_patch_approval(
                             ctx.review_context.turn(),
