@@ -162,16 +162,27 @@ pub(crate) enum ApprovalCacheKey {
     ApplyPatch(ApplyPatchApprovalKey),
 }
 
+fn apply_patch_changes_are_destructive(
+    changes: &HashMap<PathBuf, FileChange>,
+) -> bool {
+    changes.values().any(|change| {
+        matches!(
+            change,
+            FileChange::Add { .. }
+                | FileChange::Delete { .. }
+                | FileChange::Update {
+                    move_path: Some(_),
+                    ..
+                }
+        )
+    })
+}
+
 fn is_destructive_apply_patch_action(action: &ApprovalAction) -> bool {
     matches!(
         action,
         ApprovalAction::ApplyPatch { changes, .. }
-            if changes.values().any(|change| matches!(
-                change,
-                FileChange::Add { .. }
-                    | FileChange::Delete { .. }
-                    | FileChange::Update { move_path: Some(_), .. }
-            ))
+            if apply_patch_changes_are_destructive(changes)
     )
 }
 
