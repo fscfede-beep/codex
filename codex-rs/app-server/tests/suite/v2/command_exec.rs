@@ -89,6 +89,69 @@ async fn command_exec_without_streams_can_be_terminated() -> Result<()> {
 }
 
 #[tokio::test]
+async fn command_exec_rejects_sandboxed_direct_pty_backend() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    let probe = codex_home.path().join("must-not-run");
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let request_id = mcp
+        .send_command_exec_request(CommandExecParams {
+            command: if cfg!(windows) {
+                vec![
+                    "powershell.exe".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    format!("[IO.File]::WriteAllText('{}', 'x')", probe.display()),
+                ]
+            } else {
+                vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    format!("printf x > '{}'", probe.display()),
+                ]
+            },
+            process_id: None,
+            tty: false,
+            stream_stdin: false,
+            stream_stdout_stderr: false,
+            output_bytes_cap: None,
+            disable_output_cap: false,
+            disable_timeout: false,
+            timeout_ms: None,
+            cwd: None,
+            env: None,
+            size: None,
+            sandbox_policy: Some(SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![codex_home.path().to_path_buf().try_into()?],
+                network_access: false,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            permission_profile: None,
+        })
+        .await?;
+
+    let error = mcp
+        .read_stream_until_error_message(RequestId::Integer(request_id))
+        .await?;
+    assert!(
+        error
+            .error
+            .message
+            .contains("command/exec cannot use the direct PTY backend without explicit full-access authority")
+    );
+    assert!(!probe.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn command_exec_without_process_id_keeps_buffered_compatibility() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
