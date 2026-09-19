@@ -43,7 +43,11 @@ async fn process_spawn_rejects_without_touching_exec_backend() -> Result<()> {
         .send_process_spawn_request(process_spawn_params(
             "destructive-process".to_string(),
             codex_home.path(),
-            vec!["sh".to_string(), "-lc".to_string(), "rm -rf -- /".to_string()],
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "rm -rf -- /".to_string(),
+            ],
         )?)
         .await?;
     let error = mcp
