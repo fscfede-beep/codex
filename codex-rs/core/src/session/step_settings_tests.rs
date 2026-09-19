@@ -14,7 +14,9 @@ use codex_prompts::render_model_instructions;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::BaseInstructionsProvenance;
+use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::ModelsResponse;
@@ -54,6 +56,42 @@ fn set_requirements(configuration: &mut SessionConfiguration, requirements: Conf
     .expect("replace test requirements");
 }
 
+#[tokio::test]
+async fn named_permission_profile_rejects_legacy_sandbox_override() {
+    let mut configuration = make_session_configuration_for_tests().await;
+    let current_profile = configuration.permission_profile();
+    configuration
+        .permission_profile_state
+        .set_permission_profile_snapshot(PermissionProfileSnapshot::active(
+            current_profile,
+            ActivePermissionProfile::new("colleague"),
+        ))
+        .expect("named test profile should be valid");
+
+    let update = SessionSettingsUpdate {
+        sandbox_policy: Some(codex_protocol::protocol::SandboxPolicy::DangerFullAccess),
+        ..Default::default()
+    };
+    let error = configuration
+        .apply(&update, &[])
+        .expect_err("legacy sandbox override must not erase a named permission profile");
+
+    assert!(matches!(
+        error,
+        ConstraintError::InvalidValue {
+            field_name: "sandbox_policy",
+            ..
+        }
+    ));
+    assert_eq!(
+        configuration
+            .permission_profile_state
+            .active_permission_profile()
+            .expect("active profile")
+            .id,
+        "colleague"
+    );
+}
 #[tokio::test]
 async fn proposed_permission_profile_is_checked_before_step_settings() {
     let mut configuration = make_session_configuration_for_tests().await;
