@@ -118,20 +118,25 @@ where
 {
     let iterator = args.into_iter();
     let (lower, upper) = iterator.size_hint();
-    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 4);
+    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 6);
     args_vec.push(OsString::from("-c"));
     args_vec.push(OsString::from(crate::SAFE_BARE_REPOSITORY_CONFIG));
-    // Keep internal Git helper commands independent of configured hook directories.
+    // Keep internal Git helper commands independent of configured hook directories and SSH commands.
     args_vec.push(OsString::from("-c"));
     args_vec.push(OsString::from(format!(
         "core.hooksPath={DISABLED_HOOKS_PATH}"
     )));
+    args_vec.push(OsString::from("-c"));
+    args_vec.push(OsString::from("core.sshCommand="));
     for arg in iterator {
         args_vec.push(OsString::from(arg.as_ref()));
     }
     let command_string = build_command_string(&args_vec);
     let mut command = Command::new("git");
-    command.current_dir(dir);
+    command
+        .current_dir(dir)
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1");
     if let Some(envs) = env {
         for (key, value) in envs {
             command.env(key, value);
