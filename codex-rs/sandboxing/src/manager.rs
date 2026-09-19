@@ -110,6 +110,8 @@ pub struct SandboxExecRequest {
     pub windows_sandbox_level: WindowsSandboxLevel,
     pub permission_profile: PermissionProfile,
     pub arg0: Option<String>,
+    /// Ephemeral process-local capability for destructive filesystem effects.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 /// Bundled arguments for sandbox transformation.
@@ -130,6 +132,8 @@ pub struct SandboxTransformRequest<'a> {
     // (TurnEnvironment::sandbox_context for turns) so selection shares its authority.
     pub use_legacy_landlock: bool,
     pub windows_sandbox_level: WindowsSandboxLevel,
+    /// Ephemeral approval-bound capability; never serialized.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 /// Bundled arguments for a sandbox transformation whose result will be spawned
@@ -365,6 +369,7 @@ impl SandboxManager {
             sandbox_exe,
             use_legacy_landlock,
             windows_sandbox_level,
+            allow_destructive_filesystem_effects,
         } = request;
         #[cfg(target_os = "macos")]
         let managed_network = command.managed_network.as_ref();
@@ -560,6 +565,7 @@ impl SandboxManager {
             windows_sandbox_level,
             permission_profile,
             arg0: arg0_override,
+            allow_destructive_filesystem_effects,
         })
     }
 
