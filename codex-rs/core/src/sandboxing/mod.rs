@@ -66,6 +66,8 @@ pub struct ExecRequest {
     pub permission_profile: PermissionProfile,
     pub(crate) windows_sandbox_filesystem_overrides: Option<WindowsSandboxFilesystemOverrides>,
     pub arg0: Option<String>,
+    /// Ephemeral approval-bound delete capability.
+    pub allow_destructive_filesystem_effects: bool,
     pub(crate) exec_server_sandbox: Option<FileSystemSandboxContext>,
     pub(crate) exec_server_enforce_managed_network: bool,
     pub(crate) exec_server_managed_network: Option<ManagedNetworkSandboxContext>,
@@ -107,6 +109,7 @@ impl ExecRequest {
             permission_profile,
             windows_sandbox_filesystem_overrides: None,
             arg0,
+            allow_destructive_filesystem_effects: false,
             exec_server_sandbox: None,
             exec_server_enforce_managed_network: false,
             exec_server_managed_network: None,
@@ -130,6 +133,7 @@ impl ExecRequest {
             windows_sandbox_level,
             permission_profile,
             arg0,
+            allow_destructive_filesystem_effects,
             ..
         } = request;
         let ExecOptions {
@@ -194,6 +198,7 @@ impl ExecRequest {
             permission_profile,
             windows_sandbox_filesystem_overrides,
             arg0,
+            allow_destructive_filesystem_effects,
             exec_server_sandbox: None,
             exec_server_enforce_managed_network: false,
             exec_server_managed_network: None,
