@@ -221,6 +221,7 @@ fn filesystem_helper_platform_defaults_do_not_grant_applications_directory() {
                 environment_id: None,
                 network: None,
                 extra_allow_unix_sockets: &[],
+            allow_destructive_filesystem_effects: false,
             },
             profile,
             /*allowed_symlinked_codex_home*/ None,
