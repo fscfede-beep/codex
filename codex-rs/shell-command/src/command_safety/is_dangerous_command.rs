@@ -81,6 +81,85 @@ fn dangerous_command_match_with_depth(
 }
 
 /// Returns the PowerShell-specific rule matched using the target platform's semantics.
+
+/// Returns true when a command can delete filesystem objects under the selected platform semantics.
+///
+/// This intentionally does not depend on whether exec-policy already matched an allow rule.
+/// The result is an effect classification used to force destructive operations through the
+/// dedicated approval/sandbox path.
+pub fn is_destructive_filesystem_command(command: &[String]) -> bool {
+    is_destructive_filesystem_command_for_platform(command, DangerousCommandPlatform::host())
+}
+
+/// Returns true when a command can delete filesystem objects under explicit platform semantics.
+pub fn is_destructive_filesystem_command_for_platform(
+    command: &[String],
+    platform: DangerousCommandPlatform,
+) -> bool {
+    is_destructive_filesystem_command_with_depth(command, /*wrapper_depth*/ 0, platform)
+}
+
+fn is_destructive_filesystem_command_with_depth(
+    command: &[String],
+    wrapper_depth: usize,
+    platform: DangerousCommandPlatform,
+) -> bool {
+    if wrapper_depth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH {
+        return true;
+    }
+
+    if is_destructive_command_for_exec(command, platform) {
+        return true;
+    }
+
+    if parse_shell_lc_literal_commands(command).is_some_and(|commands| {
+        commands.iter().any(|command| {
+            is_destructive_filesystem_command_with_depth(command, wrapper_depth + 1, platform)
+        })
+    }) {
+        return true;
+    }
+
+    platform == DangerousCommandPlatform::Windows
+        && (windows_dangerous_commands::is_dangerous_command_windows(command)
+            || windows_dangerous_commands::is_dangerous_powershell_words(command))
+}
+
+fn is_destructive_command_for_exec(
+    command: &[String],
+    platform: DangerousCommandPlatform,
+) -> bool {
+    let Some(name) = command
+        .first()
+        .and_then(|raw| executable_name_lookup_key(raw, platform))
+    else {
+        return false;
+    };
+    let args = &command[1..];
+
+    match name.as_str() {
+        "rm" | "unlink" | "rmdir" | "rd" | "del" | "erase" | "remove-item" => {
+            !args.is_empty()
+        }
+        "find" => args.iter().any(|arg| arg == "-delete" || arg == "--delete"),
+        "git" => {
+            matches!(args.first().map(String::as_str), Some("clean"))
+                && args.iter().skip(1).any(|arg| {
+                    arg == "--force"
+                        || arg
+                            .strip_prefix('-')
+                            .is_some_and(|flags| !flags.starts_with('-') && flags.contains('f'))
+                })
+        }
+        "sudo" | "env" => is_destructive_filesystem_command_with_depth(
+            command,
+            /*wrapper_depth*/ 1,
+            platform,
+        ),
+        _ => false,
+    }
+}
+
 pub fn dangerous_powershell_words_match(
     command: &[String],
     platform: DangerousCommandPlatform,
@@ -305,6 +384,32 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn destructive_filesystem_commands_include_common_delete_forms() {
+        let cases = [
+            vec_str(&["rm", "-r", "/tmp/example"]),
+            vec_str(&["rm", "-f", "/tmp/example"]),
+            vec_str(&["unlink", "/tmp/example"]),
+            vec_str(&["find", "/tmp/example", "-delete"]),
+            vec_str(&["git", "clean", "-fd"]),
+            vec_str(&["bash", "-lc", "rm -rf /tmp/example"]),
+        ];
+        for command in cases {
+            assert!(is_destructive_filesystem_command(&command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn non_destructive_commands_do_not_trigger_delete_classifier() {
+        for command in [
+            vec_str(&["rm"]),
+            vec_str(&["git", "status"]),
+            vec_str(&["bash", "-lc", "echo rm -rf /tmp/example"]),
+        ] {
+            assert!(!is_destructive_filesystem_command(&command), "{command:?}");
+        }
+    }
+
     fn direct_powershell_words_return_other_match_on_windows() {
         let command = vec_str(&["Remove-Item", "test", "-Force"]);
 
