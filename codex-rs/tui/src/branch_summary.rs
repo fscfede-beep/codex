@@ -687,6 +687,8 @@ mod tests {
                     [
                         "-c".to_string(),
                         codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
                     ],
                 );
             }
