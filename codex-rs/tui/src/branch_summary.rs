@@ -11,7 +11,7 @@
 //! without blocking the rest of the UI.
 
 #[cfg(test)]
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::Path;
 
 use serde::Deserialize;
