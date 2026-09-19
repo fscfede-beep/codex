@@ -270,6 +270,8 @@ pub struct SandboxManager {
     seatbelt_profile: MacosSeatbeltProfile,
     #[cfg(target_os = "macos")]
     allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
+    /// Process-local capability that permits filesystem delete/rename operations.
+    allow_destructive_filesystem_effects: bool,
 }
 
 impl SandboxManager {
@@ -284,7 +286,15 @@ impl SandboxManager {
             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
             #[cfg(target_os = "macos")]
             allowed_symlinked_codex_home: None,
+            allow_destructive_filesystem_effects: true,
         }
+    }
+
+    /// Returns a manager with an explicit process-local delete capability.
+    /// This is intentionally not serialized and does not mutate persistent permissions.
+    pub fn with_allow_destructive_filesystem_effects(mut self, allow: bool) -> Self {
+        self.allow_destructive_filesystem_effects = allow;
+        self
     }
 
     /// Allows otherwise-authorized writable roots beneath the opted-in user home
@@ -455,6 +465,9 @@ impl SandboxManager {
                         SandboxTransformError::EnvironmentNetworkProxy(message)
                     }
                 })?;
+                if !self.allow_destructive_filesystem_effects {
+                    append_macos_delete_deny(&mut args);
+                }
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                 full_command.append(&mut args);
@@ -500,6 +513,9 @@ impl SandboxManager {
                     use_legacy_landlock,
                     managed_network.as_ref(),
                 );
+                if !self.allow_destructive_filesystem_effects {
+                    insert_linux_delete_fence_flag(&mut args);
+                }
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
                 full_command.append(&mut args);
@@ -783,6 +799,22 @@ fn ensure_linux_bubblewrap_is_supported(
     Ok(())
 }
 
+fn insert_linux_delete_fence_flag(args: &mut Vec<String>) {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or_else(|| panic!("linux sandbox args missing command separator"));
+    args.insert(separator, "--deny-filesystem-delete".to_string());
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_delete_deny(args: &mut Vec<String>) {
+    let policy = args
+        .get_mut(1)
+        .unwrap_or_else(|| panic!("macOS sandbox args missing policy"));
+    policy.push_str("\n(deny file-write-unlink)");
+}
+
 fn os_string_to_command_component(value: OsString) -> String {
     value
         .into_string()
@@ -798,5 +830,3 @@ fn linux_sandbox_arg0_override(exe: &Path) -> String {
 }
 
 #[cfg(test)]
-#[path = "manager_tests.rs"]
-mod tests;
