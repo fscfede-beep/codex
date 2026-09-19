@@ -44,6 +44,28 @@ fn test_standalone_exec_cli_can_use_apply_patch() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn hidden_arg0_apply_patch_rejects_destructive_delete_before_filesystem_mutation() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let target = tmp.path().join("protected.txt");
+    fs::write(&target, "must survive\n")?;
+
+    let delete_patch = r#"*** Begin Patch
+*** Delete File: protected.txt
+*** End Patch"#;
+
+    Command::new(codex_utils_cargo_bin::cargo_bin("codex-exec")?)
+        .arg(CODEX_CORE_APPLY_PATCH_ARG1)
+        .arg(delete_patch)
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("destructive apply_patch"));
+
+    assert_eq!(fs::read_to_string(&target)?, "must survive\n");
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_apply_patch_tool() -> anyhow::Result<()> {

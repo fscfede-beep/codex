@@ -46,6 +46,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
     proxy_routing_active: bool,
+    deny_destructive_filesystem_effects: bool,
 ) -> Result<()> {
     let (file_system_sandbox_policy, network_sandbox_policy) =
         permission_profile.to_runtime_permissions();
@@ -68,6 +69,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     // we avoid this unless we need seccomp or we are explicitly using the
     // legacy Landlock filesystem pipeline.
     if network_seccomp_mode.is_some()
+        || deny_destructive_filesystem_effects
         || (apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access())
     {
         set_no_new_privs()?;
@@ -76,6 +78,10 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     if let Some(mode) = network_seccomp_mode {
         install_network_seccomp_filter_on_current_thread(mode, managed_network)?;
     }
+    if deny_destructive_filesystem_effects {
+        install_destructive_filesystem_deny()?;
+    }
+
 
     if apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access() {
         if !file_system_sandbox_policy.has_full_disk_read_access() {
@@ -135,6 +141,22 @@ fn set_no_new_privs() -> Result<()> {
     Ok(())
 }
 
+/// Installs a deny-only Landlock layer for unlink, directory removal, and cross-directory rename.
+/// No rule grants these handled rights, so they are denied throughout the sandboxed process.
+fn install_destructive_filesystem_deny() -> Result<()> {
+    let abi = ABI::V5;
+    let destructive_access = AccessFs::RemoveDir | AccessFs::RemoveFile | AccessFs::Refer;
+    let status = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(destructive_access)?
+        .create()?
+        .restrict_self()?;
+    if status.ruleset == landlock::RulesetStatus::NotEnforced {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+    Ok(())
+}
+
 /// Installs Landlock file-system rules on the current thread allowing read
 /// access to the entire file-system while restricting write access to
 /// `/dev/null` and the provided list of `writable_roots`.
@@ -144,6 +166,7 @@ fn set_no_new_privs() -> Result<()> {
 ///
 /// Note: this is currently unused because filesystem sandboxing is performed
 /// via bubblewrap. It is kept for reference and potential fallback use.
+#[cfg_attr(not(test), allow(dead_code))]
 fn install_filesystem_landlock_rules_on_current_thread(
     writable_roots: Vec<AbsolutePathBuf>,
 ) -> Result<()> {
