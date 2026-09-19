@@ -126,10 +126,10 @@ impl ApplyPatchRuntime {
 
 impl Sandboxable for ApplyPatchRuntime {
     fn sandbox_preference(&self) -> SandboxablePreference {
-        SandboxablePreference::Require
+        SandboxablePreference::Auto
     }
     fn escalate_on_failure(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -164,6 +164,30 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 }
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
+    fn sandbox_preference_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: SandboxablePreference,
+    ) -> SandboxablePreference {
+        if req.action.is_destructive() {
+            SandboxablePreference::Require
+        } else {
+            base
+        }
+    }
+
+    fn escalate_on_failure_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: bool,
+    ) -> bool {
+        if req.action.is_destructive() {
+            false
+        } else {
+            base
+        }
+    }
+
     fn permission_profile_for_attempt(
         &self,
         req: &ApplyPatchRequest,
