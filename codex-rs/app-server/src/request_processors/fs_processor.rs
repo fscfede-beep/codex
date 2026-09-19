@@ -155,22 +155,13 @@ impl FsRequestProcessor {
 
     pub(crate) async fn remove(
         &self,
-        params: FsRemoveParams,
+        _params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        let path = PathUri::from_abs_path(&params.path);
-        self.file_system()?
-            .remove(
-                &path,
-                RemoveOptions {
-                    recursive: params.recursive.unwrap_or(true),
-                    force: params.force.unwrap_or(true),
-                    follow_symlinks: true,
-                },
-                /*sandbox*/ None,
-            )
-            .await
-            .map_err(map_fs_error)?;
-        Ok(FsRemoveResponse {})
+        let _ = self.file_system()?;
+        Err(invalid_request(
+            "fs/remove is disabled because this RPC does not carry a scoped filesystem sandbox authority"
+                .to_string(),
+        ))
     }
 
     pub(crate) async fn copy(
