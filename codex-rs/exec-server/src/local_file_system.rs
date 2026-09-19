@@ -240,26 +240,8 @@ impl LocalFileSystem {
         options: RemoveOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()> {
-        let Some(sandbox) = sandbox else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "filesystem deletion requires a scoped sandbox",
-            ));
-        };
-        sandbox.validate_file_system_paths_for_current_host()?;
-        let policy = sandbox.permissions.file_system_sandbox_policy();
-        if !matches!(
-            sandbox.permissions,
-            codex_protocol::models::PermissionProfile::Managed { .. }
-        ) || !sandbox.should_write_into_sandbox()
-            || !policy.has_configured_writable_roots(&sandbox.policy_context())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "filesystem deletion requires a restricted writable-root sandbox",
-            ));
-        }
-        self.sandboxed()?.remove(path, options, Some(sandbox)).await
+        let (file_system, sandbox) = self.file_system_for_writes(sandbox)?;
+        file_system.remove(path, options, sandbox).await
     }
 
     async fn copy(
