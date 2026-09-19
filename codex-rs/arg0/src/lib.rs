@@ -118,6 +118,12 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
         let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
         let exit_code = match patch_arg {
             Some(patch_arg) => {
+                if codex_apply_patch::patch_is_destructive(&patch_arg) {
+                    eprintln!(
+                        "Error: destructive apply_patch requires the governed Codex approval and sandbox path."
+                    );
+                    return std::process::exit(1);
+                }
                 let mut stdout = std::io::stdout();
                 let mut stderr = std::io::stderr();
                 let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
