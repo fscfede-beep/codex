@@ -921,3 +921,4 @@ fn record_resolution(ctx: &ApprovalContext, resolution: &ApprovalResolution) {
 #[cfg(all(test, unix))]
 #[path = "approvals_tests.rs"]
 mod tests;
+
