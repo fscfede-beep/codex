@@ -482,9 +482,9 @@ mod tests {
     use super::*;
     use crate::workspace_command::WorkspaceCommand;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[tokio::test]
