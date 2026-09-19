@@ -49,6 +49,8 @@ use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
@@ -128,6 +130,38 @@ fn unified_exec_options(
     }
 }
 
+fn is_destructive_filesystem_exec(req: &UnifiedExecRequest) -> bool {
+    let platform = match req.turn_environment.executor_platform_os.as_deref() {
+        Some("windows") => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Windows,
+        Some(_) => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Posix,
+        None => match req.sandbox_cwd.infer_path_convention() {
+            Some(codex_utils_path_uri::PathConvention::Windows) => {
+                codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Windows
+            }
+            _ => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Posix,
+        },
+    };
+    codex_shell_command::is_dangerous_command::is_destructive_filesystem_command_for_platform(
+        &req.command,
+        platform,
+    )
+}
+
+fn destructive_safe_additional_permissions(
+    req: &UnifiedExecRequest,
+    internal_permissions: Option<&AdditionalPermissionProfile>,
+) -> Option<AdditionalPermissionProfile> {
+    let merged = merge_permission_profiles(req.additional_permissions.as_ref(), internal_permissions);
+    if !is_destructive_filesystem_exec(req) {
+        return merged;
+    }
+    let mut restricted = merged?;
+    // Destructive executions already receive a workspace-only PermissionProfile in the
+    // orchestrator. Do not allow an additional filesystem overlay to widen it again.
+    restricted.file_system = None;
+    (!restricted.is_empty()).then_some(restricted)
+}
+
 fn build_unified_exec_sandbox_command(
     command: &[String],
     cwd: &PathUri,
@@ -199,13 +233,54 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
     }
 
     fn sandbox_permissions(&self, req: &UnifiedExecRequest) -> SandboxPermissions {
-        req.sandbox_permissions
+        if is_destructive_filesystem_exec(req) {
+            SandboxPermissions::UseDefault
+        } else {
+            req.sandbox_permissions
+        }
     }
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRuntime<'a> {
     fn turn_environment<'b>(&self, req: &'b UnifiedExecRequest) -> &'b TurnEnvironment {
         &req.turn_environment
+    }
+
+    fn sandbox_preference_for_request(
+        &self,
+        req: &UnifiedExecRequest,
+    ) -> SandboxablePreference {
+        if is_destructive_filesystem_exec(req) {
+            SandboxablePreference::Require
+        } else {
+            self.sandbox_preference()
+        }
+    }
+
+    fn escalate_on_failure_for_request(&self, req: &UnifiedExecRequest) -> bool {
+        if is_destructive_filesystem_exec(req) {
+            false
+        } else {
+            self.escalate_on_failure()
+        }
+    }
+
+    fn permission_profile_for_request(
+        &self,
+        req: &UnifiedExecRequest,
+        permissions: &PermissionProfile,
+        workspace_roots: &[PathUri],
+    ) -> PermissionProfile {
+        if is_destructive_filesystem_exec(req) {
+            PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            permissions.clone()
+        }
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &UnifiedExecRequest) -> bool {
@@ -598,10 +673,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             });
         let internal_permissions =
             merge_permission_profiles(sidecar_permissions.as_ref(), snapshot_permissions.as_ref());
-        let additional_permissions = merge_permission_profiles(
-            req.additional_permissions.as_ref(),
-            internal_permissions.as_ref(),
-        );
+        let additional_permissions =
+            destructive_safe_additional_permissions(req, internal_permissions.as_ref());
         let permissions = TerminalPermissions::for_launch(
             &req.turn_environment,
             &ctx.step_context.turn,
@@ -615,7 +688,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             } else {
                 SandboxPermissions::UseDefault
             },
-            req.additional_permissions.as_ref(),
+            additional_permissions.as_ref(),
             internal_permissions.as_ref(),
         );
 
@@ -928,48 +1001,3 @@ mod tests {
         assert_eq!(
             runtime.exec_approval_requirement(&request),
             Some(ExecApprovalRequirement::Skip {
-                bypass_sandbox: true,
-                proposed_execpolicy_amendment: None,
-            }),
-            "zsh-fork unified exec should preserve exec-policy allow decisions that bypass the sandbox"
-        );
-    }
-
-    fn test_request(
-        sandbox_permissions: SandboxPermissions,
-        exec_approval_requirement: ExecApprovalRequirement,
-    ) -> UnifiedExecRequest {
-        let cwd = AbsolutePathBuf::try_from(std::env::current_dir().unwrap())
-            .expect("current dir is absolute");
-        UnifiedExecRequest {
-            command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-            shell_type: ShellType::Zsh,
-            hook_command: "echo hi".to_string(),
-            process_id: 1000,
-            cwd: cwd.clone().into(),
-            sandbox_cwd: cwd.clone().into(),
-            turn_environment: test_turn_environment(cwd.into()),
-            env: HashMap::new(),
-            exec_server_env_config: None,
-            shell_snapshot: None,
-            explicit_env_overrides: HashMap::new(),
-            network: None,
-            tty: false,
-            sandbox_permissions,
-            additional_permissions: None,
-            #[cfg(unix)]
-            additional_permissions_preapproved: false,
-            justification: None,
-            exec_approval_requirement,
-        }
-    }
-
-    fn zsh_fork_mode() -> UnifiedExecShellMode {
-        let cwd = std::env::current_dir().expect("read current dir");
-        UnifiedExecShellMode::ZshFork(ZshForkConfig {
-            shell_zsh_path: AbsolutePathBuf::try_from(cwd.join("zsh")).expect("absolute zsh path"),
-            main_execve_wrapper_exe: AbsolutePathBuf::try_from(cwd.join("execve-wrapper"))
-                .expect("absolute wrapper path"),
-        })
-    }
-}
