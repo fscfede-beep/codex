@@ -226,7 +226,7 @@ async fn get_default_branch(
             return Some(branch);
         }
 
-remove remote show call    }
+    }
 
     get_default_branch_local(runner, cwd).await
 }
