@@ -262,10 +262,6 @@ async fn get_remote_default_branch_from_symbolic_ref(
     })
 }
 
-/// Parses `git remote show` output to discover a remote's default branch ref.
-///
-/// This is a fallback for repositories where `refs/remotes/<remote>/HEAD` is not configured but
-/// `git remote show` can still report the upstream HEAD branch. The concrete remote-tracking ref
 /// Falls back to local `main` or `master` when no remote default branch can be found.
 async fn get_default_branch_local(
     runner: &dyn WorkspaceCommandExecutor,
@@ -721,7 +717,7 @@ mod tests {
                     [
                         "-c".to_string(),
                         codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
-                    "core.sshCommand=".to_string(),
+                        "core.sshCommand=".to_string(),
                     ],
                 );
             }
