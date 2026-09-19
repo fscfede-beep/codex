@@ -27,6 +27,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_shell_command::is_dangerous_command::DangerousCommandMatch;
 use codex_shell_command::is_dangerous_command::DangerousCommandPlatform;
 use codex_shell_command::is_dangerous_command::dangerous_command_match_for_platform;
+use codex_shell_command::is_dangerous_command::is_destructive_filesystem_command_for_platform;
 use thiserror::Error;
 use tokio::fs;
 use tokio::sync::Semaphore;
@@ -353,6 +354,41 @@ impl ExecPolicyManager {
             prefix_rule,
             allow_prefix_rules,
         } = req;
+        let destructive_command = is_destructive_filesystem_command_for_platform(
+            command,
+            command_platform,
+        ) || commands.iter().any(|parsed| {
+            is_destructive_filesystem_command_for_platform(parsed, command_platform)
+        });
+
+        // Destructive filesystem effects must never be turned into an implicit allow by an
+        // exec-policy prefix rule. They always require the dedicated fresh-approval path.
+        if destructive_command {
+            return match approval_policy {
+                AskForApproval::Never => ExecApprovalRequirement::Forbidden {
+                    reason: "destructive filesystem command forbidden by AskForApproval::Never"
+                        .to_string(),
+                },
+                AskForApproval::Granular(granular_config)
+                    if !granular_config.allows_sandbox_approval() =>
+                {
+                    ExecApprovalRequirement::Forbidden {
+                        reason: "destructive filesystem command requires sandbox approval"
+                            .to_string(),
+                    }
+                }
+                AskForApproval::OnRequest
+                | AskForApproval::UnlessTrusted
+                | AskForApproval::Granular(_) => ExecApprovalRequirement::NeedsApproval {
+                    reason: Some(
+                        "destructive filesystem command requires fresh human approval"
+                            .to_string(),
+                    ),
+                    proposed_execpolicy_amendment: None,
+                },
+            };
+        }
+
         let exec_policy = self.current_for_environment(environment_policy, allow_prefix_rules);
         // Avoid reusable approvals when this model does not honor prefix rules.
         let auto_amendment_allowed = allow_prefix_rules == AllowPrefixRules::Honor;
@@ -898,278 +934,3 @@ fn commands_for_exec_policy_for_platform(
     }
 
     ExecPolicyCommands {
-        commands: vec![command.to_vec()],
-        command_origin: ExecPolicyCommandOrigin::Generic,
-    }
-}
-
-/// Derive a proposed execpolicy amendment when a command requires user approval
-/// - If any execpolicy rule prompts, return None, because an amendment would not skip that policy requirement.
-/// - Otherwise return the first heuristics Prompt.
-/// - Examples:
-/// - execpolicy: empty. Command: `["python"]`. Heuristics prompt -> `Some(vec!["python"])`.
-/// - execpolicy: empty. Command: `["bash", "-c", "cd /some/folder && prog1 --option1 arg1 && prog2 --option2 arg2"]`.
-///   Parsed commands include `cd /some/folder`, `prog1 --option1 arg1`, and `prog2 --option2 arg2`. If heuristics allow `cd` but prompt
-///   on `prog1`, we return `Some(vec!["prog1", "--option1", "arg1"])`.
-/// - execpolicy: contains a `prompt for prefix ["prog2"]` rule. For the same command as above,
-///   we return `None` because an execpolicy prompt still applies even if we amend execpolicy to allow ["prog1", "--option1", "arg1"].
-fn try_derive_execpolicy_amendment_for_prompt_rules(
-    matched_rules: &[RuleMatch],
-) -> Option<ExecPolicyAmendment> {
-    if matched_rules
-        .iter()
-        .any(|rule_match| is_policy_match(rule_match) && rule_match.decision() == Decision::Prompt)
-    {
-        return None;
-    }
-
-    matched_rules
-        .iter()
-        .find_map(|rule_match| match rule_match {
-            RuleMatch::HeuristicsRuleMatch {
-                command,
-                decision: Decision::Prompt,
-            } => Some(ExecPolicyAmendment::from(command.clone())),
-            _ => None,
-        })
-}
-
-/// - Note: we only use this amendment when the command fails to run in sandbox and codex prompts the user to run outside the sandbox
-/// - The purpose of this amendment is to bypass sandbox for similar commands in the future
-/// - If any execpolicy rule matches, return None, because we would already be running command outside the sandbox
-fn try_derive_execpolicy_amendment_for_allow_rules(
-    matched_rules: &[RuleMatch],
-) -> Option<ExecPolicyAmendment> {
-    if matched_rules.iter().any(is_policy_match) {
-        return None;
-    }
-
-    matched_rules
-        .iter()
-        .find_map(|rule_match| match rule_match {
-            RuleMatch::HeuristicsRuleMatch {
-                command,
-                decision: Decision::Allow,
-            } => Some(ExecPolicyAmendment::from(command.clone())),
-            _ => None,
-        })
-}
-
-fn derive_requested_execpolicy_amendment_from_prefix_rule(
-    prefix_rule: Option<&Vec<String>>,
-    matched_rules: &[RuleMatch],
-    exec_policy: &Policy,
-    commands: &[Vec<String>],
-    exec_policy_fallback: &impl Fn(&[String]) -> Decision,
-    match_options: &MatchOptions,
-) -> Option<ExecPolicyAmendment> {
-    let prefix_rule = prefix_rule?;
-    if prefix_rule.is_empty() {
-        return None;
-    }
-    if BANNED_PREFIX_SUGGESTIONS.iter().any(|banned| {
-        prefix_rule.len() == banned.len()
-            && prefix_rule
-                .iter()
-                .map(String::as_str)
-                .eq(banned.iter().copied())
-    }) {
-        return None;
-    }
-
-    // if any policy rule already matches, don't suggest an additional rule that might conflict or not apply
-    if matched_rules.iter().any(is_policy_match) {
-        return None;
-    }
-
-    let amendment = ExecPolicyAmendment::new(prefix_rule.clone());
-    if prefix_rule_would_approve_all_commands(
-        exec_policy,
-        &amendment.command,
-        commands,
-        exec_policy_fallback,
-        match_options,
-    ) {
-        Some(amendment)
-    } else {
-        None
-    }
-}
-
-fn prefix_rule_would_approve_all_commands(
-    exec_policy: &Policy,
-    prefix_rule: &[String],
-    commands: &[Vec<String>],
-    exec_policy_fallback: &impl Fn(&[String]) -> Decision,
-    match_options: &MatchOptions,
-) -> bool {
-    let mut policy_with_prefix_rule = exec_policy.clone();
-    if policy_with_prefix_rule
-        .add_prefix_rule(prefix_rule, Decision::Allow)
-        .is_err()
-    {
-        return false;
-    }
-
-    commands.iter().all(|command| {
-        policy_with_prefix_rule
-            .check_with_options(command, exec_policy_fallback, match_options)
-            .decision
-            == Decision::Allow
-    })
-}
-
-/// Only return a reason when a policy rule drove the prompt decision.
-fn derive_prompt_reason(command_args: &[String], evaluation: &Evaluation) -> Option<String> {
-    let command = render_shlex_command(command_args);
-
-    let most_specific_prompt = evaluation
-        .matched_rules
-        .iter()
-        .filter_map(|rule_match| match rule_match {
-            RuleMatch::PrefixRuleMatch {
-                matched_prefix,
-                decision: Decision::Prompt,
-                justification,
-                ..
-            } => Some((matched_prefix.len(), justification.as_deref())),
-            _ => None,
-        })
-        .max_by_key(|(matched_prefix_len, _)| *matched_prefix_len);
-
-    match most_specific_prompt {
-        Some((_matched_prefix_len, Some(justification))) => {
-            Some(format!("`{command}` requires approval: {justification}"))
-        }
-        Some((_matched_prefix_len, None)) => {
-            Some(format!("`{command}` requires approval by policy"))
-        }
-        None => None,
-    }
-}
-
-fn render_shlex_command(args: &[String]) -> String {
-    shlex_try_join(args.iter().map(String::as_str)).unwrap_or_else(|_| args.join(" "))
-}
-
-/// Derive a string explaining why the command was forbidden. If `justification`
-/// is set by the user, this can contain instructions with recommended
-/// alternatives, for example.
-fn derive_forbidden_reason(
-    command_args: &[String],
-    evaluation: &Evaluation,
-    dangerous_command_match: Option<DangerousCommandMatch>,
-) -> String {
-    let command = render_shlex_command(command_args);
-
-    let most_specific_forbidden = evaluation
-        .matched_rules
-        .iter()
-        .filter_map(|rule_match| match rule_match {
-            RuleMatch::PrefixRuleMatch {
-                matched_prefix,
-                decision: Decision::Forbidden,
-                justification,
-                ..
-            } => Some((matched_prefix, justification.as_deref())),
-            _ => None,
-        })
-        .max_by_key(|(matched_prefix, _)| matched_prefix.len());
-
-    match most_specific_forbidden {
-        Some((_matched_prefix, Some(justification))) => {
-            format!("`{command}` rejected: {justification}")
-        }
-        Some((matched_prefix, None)) => {
-            let prefix = render_shlex_command(matched_prefix);
-            format!("`{command}` rejected: policy forbids commands starting with `{prefix}`")
-        }
-        None => {
-            if let Some(dangerous_command_match) = dangerous_command_match {
-                let reason = dangerous_command_rejection_reason(dangerous_command_match);
-                format!("`{command}` rejected: {reason}")
-            } else {
-                format!("`{command}` rejected: blocked by policy")
-            }
-        }
-    }
-}
-
-fn derive_rejected_prompt_reason(
-    fallback_reason: &str,
-    dangerous_command_match: Option<DangerousCommandMatch>,
-) -> String {
-    match dangerous_command_match {
-        Some(dangerous_command_match @ DangerousCommandMatch::ForcedRm) => {
-            dangerous_command_rejection_reason(dangerous_command_match).to_string()
-        }
-        Some(DangerousCommandMatch::Other) | None => fallback_reason.to_string(),
-    }
-}
-
-fn dangerous_command_rejection_reason(
-    dangerous_command_match: DangerousCommandMatch,
-) -> &'static str {
-    match dangerous_command_match {
-        DangerousCommandMatch::ForcedRm => {
-            "rm -f style commands are not permitted. Use a safer approach"
-        }
-        DangerousCommandMatch::Other => "blocked by policy",
-    }
-}
-
-async fn collect_policy_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>, ExecPolicyError> {
-    let dir = dir.as_ref();
-    let mut read_dir = match fs::read_dir(dir).await {
-        Ok(read_dir) => read_dir,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(ExecPolicyError::ReadDir {
-                dir: dir.to_path_buf(),
-                source,
-            });
-        }
-    };
-
-    let mut policy_paths = Vec::new();
-    while let Some(entry) =
-        read_dir
-            .next_entry()
-            .await
-            .map_err(|source| ExecPolicyError::ReadDir {
-                dir: dir.to_path_buf(),
-                source,
-            })?
-    {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .await
-            .map_err(|source| ExecPolicyError::ReadDir {
-                dir: dir.to_path_buf(),
-                source,
-            })?;
-
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext == RULE_EXTENSION)
-            && file_type.is_file()
-        {
-            policy_paths.push(path);
-        }
-    }
-
-    policy_paths.sort();
-
-    tracing::debug!(
-        "loaded {} .rules files in {}",
-        policy_paths.len(),
-        dir.display()
-    );
-    Ok(policy_paths)
-}
-
-#[cfg(test)]
-#[path = "exec_policy_tests.rs"]
-mod tests;
