@@ -364,6 +364,29 @@ pub(crate) enum ToolError {
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
+    /// Select a sandbox preference for the concrete request. Destructive requests can force
+    /// sandboxing without changing the tool's default behavior for ordinary requests.
+    fn sandbox_preference_for_request(&self, _req: &Req) -> SandboxablePreference {
+        self.sandbox_preference()
+    }
+
+    /// Control whether a sandbox denial may be retried with weaker isolation.
+    fn escalate_on_failure_for_request(&self, _req: &Req) -> bool {
+        self.escalate_on_failure()
+    }
+
+    /// Return the effective filesystem permission profile for this request.
+    /// Implementations may narrow authority for high-risk effects without changing the
+    /// turn-wide profile.
+    fn permission_profile_for_request(
+        &self,
+        _req: &Req,
+        permissions: &codex_protocol::models::PermissionProfile,
+        _workspace_roots: &[PathUri],
+    ) -> codex_protocol::models::PermissionProfile {
+        permissions.clone()
+    }
+
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
         false
     }
