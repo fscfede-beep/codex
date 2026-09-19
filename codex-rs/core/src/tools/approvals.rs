@@ -172,6 +172,38 @@ fn is_destructive_apply_patch_action(action: &ApprovalAction) -> bool {
     })
 }
 
+fn is_destructive_process_command(command: &[String]) -> bool {
+    is_destructive_filesystem_command_for_platform(command, DangerousCommandPlatform::Posix)
+        || is_destructive_filesystem_command_for_platform(
+            command,
+            DangerousCommandPlatform::Windows,
+        )
+}
+
+fn is_destructive_stdin_input(input: &str) -> bool {
+    let posix = vec!["sh".to_string(), "-c".to_string(), input.to_string()];
+    let windows = vec![
+        "powershell".to_string(),
+        "-Command".to_string(),
+        input.to_string(),
+    ];
+    is_destructive_process_command(&posix) || is_destructive_process_command(&windows)
+}
+
+fn is_destructive_process_approval_action(action: &ApprovalAction) -> bool {
+    match action {
+        ApprovalAction::ExecCommand { command, .. } => is_destructive_process_command(command),
+        ApprovalAction::WriteStdin { input, .. } => is_destructive_stdin_input(input),
+        #[cfg(unix)]
+        ApprovalAction::Execve { command, .. } => is_destructive_process_command(command),
+        ApprovalAction::ApplyPatch { .. }
+        | ApprovalAction::McpToolCall { .. }
+        | ApprovalAction::NetworkAccess { .. }
+        | ApprovalAction::RequestPermissions { .. } => false,
+    }
+}
+
+
 impl ApprovalAction {
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
@@ -497,6 +529,32 @@ impl Session {
         {
             return Err(ToolError::Rejected(reason.to_string()));
         }
+        if is_destructive_process_approval_action(&action) {
+            if matches!(policy, AskForApproval::Never)
+                || matches!(
+                    policy,
+                    AskForApproval::Granular(granular_config)
+                        if !granular_config.allows_sandbox_approval()
+                )
+            {
+                return Err(ToolError::Rejected(
+                    "destructive filesystem action requires fresh human approval".to_string(),
+                ));
+            }
+            let decision = self.request_user_approval(&action, &ctx).await;
+            let decision = if decision == ReviewDecision::ApprovedForSession {
+                ReviewDecision::Approved
+            } else {
+                decision
+            };
+            let resolution = ApprovalResolution {
+                decision,
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
+
         if is_destructive_apply_patch_action(&action) {
             if matches!(policy, AskForApproval::Never)
                 || matches!(
@@ -605,7 +663,9 @@ impl Session {
         action: ApprovalAction,
         ctx: &ApprovalContext,
     ) -> Option<ReviewDecision> {
-        if is_destructive_apply_patch_action(&action) {
+        if is_destructive_process_approval_action(&action)
+            || is_destructive_apply_patch_action(&action)
+        {
             return None;
         }
 
@@ -739,6 +799,27 @@ impl Session {
                     .find(|environment| environment.selection.environment_id == *environment_id)
                     .and_then(|environment| environment.config().exec_policy.as_ref())
                     .map(codex_execpolicy::RequirementsExecPolicy::fingerprint);
+                if is_destructive_process_approval_action(action) {
+                    return self
+                        .request_command_approval(
+                            ctx.review_context.turn(),
+                            ExecApprovalKind::Command,
+                            ctx.review_context.model_context(),
+                            ctx.call_id.clone(),
+                            /*approval_id*/ None,
+                            Some(environment_id.clone()),
+                            command.clone(),
+                            cwd.clone(),
+                            reason,
+                            ctx.network_approval_context.clone(),
+                            /*proposed_execpolicy_amendment*/ None,
+                            /*additional_permissions*/ None,
+                            /*available_decisions*/ None,
+                            /*plugin_attribution_override*/ None,
+                        )
+                        .await;
+                }
+
                 let cache_keys = action
                     .cache_keys()
                     .into_iter()
