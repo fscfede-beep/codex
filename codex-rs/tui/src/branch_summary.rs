@@ -537,6 +537,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_git_command_forces_empty_ssh_command() {
+        let runner = FakeRunner::new(vec![FakeResponse {
+            argv: vec![
+                "git".to_string(),
+                "-c".to_string(),
+                codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                "-c".to_string(),
+                "core.sshCommand=".to_string(),
+                "rev-parse".to_string(),
+                "--git-dir".to_string(),
+            ],
+            output: WorkspaceCommandOutput {
+                exit_code: 0,
+                stdout: ".git\n".to_string(),
+                stderr: String::new(),
+            },
+        }]);
+
+        let output = run_git_command(&runner, Path::new("/repo"), &["rev-parse", "--git-dir"])
+            .await
+            .expect("git command");
+
+        assert!(output.success());
+    }
+
+    #[tokio::test]
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
             &["gh", "pr", "view", "--json", "number,url,state"],
