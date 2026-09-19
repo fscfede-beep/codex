@@ -31,6 +31,26 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
     use_legacy_landlock: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
 ) -> Vec<String> {
+    create_linux_sandbox_command_args_for_permission_profile_with_delete_policy(
+        command,
+        command_cwd,
+        permission_profile,
+        sandbox_policy_cwd,
+        use_legacy_landlock,
+        managed_network,
+        /*deny_destructive_filesystem*/ true,
+    )
+}
+
+pub fn create_linux_sandbox_command_args_for_permission_profile_with_delete_policy(
+    command: Vec<String>,
+    command_cwd: &Path,
+    permission_profile: &PermissionProfile,
+    sandbox_policy_cwd: &Path,
+    use_legacy_landlock: bool,
+    managed_network: Option<&ManagedNetworkSandboxContext>,
+    deny_destructive_filesystem: bool,
+) -> Vec<String> {
     let permission_profile_json = serde_json::to_string(permission_profile)
         .unwrap_or_else(|err| panic!("failed to serialize permission profile: {err}"));
     let sandbox_policy_cwd = sandbox_policy_cwd
@@ -53,6 +73,9 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
     // Proxy-only networking requires bubblewrap's isolated network namespace.
     if use_legacy_landlock && managed_network.is_none() {
         linux_cmd.push("--use-legacy-landlock".to_string());
+    }
+    if deny_destructive_filesystem {
+        linux_cmd.push("--deny-destructive-filesystem".to_string());
     }
     if let Some(managed_network) = managed_network {
         linux_cmd.push("--managed-network".to_string());
