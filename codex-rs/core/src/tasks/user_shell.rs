@@ -562,8 +562,8 @@ mod shell_safety_tests {
             file_system: ManagedFileSystemPermissions::Unrestricted,
             network: NetworkSandboxPolicy::Restricted,
         };
-        let profile = user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri))
-            .unwrap();
+        let profile =
+            user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri)).unwrap();
 
         assert!(matches!(
             profile,
@@ -582,8 +582,9 @@ mod shell_safety_tests {
             network: NetworkSandboxPolicy::Enabled,
         };
 
-        assert!(user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri))
-            .is_err());
+        assert!(
+            user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri)).is_err()
+        );
     }
 
     #[test]
