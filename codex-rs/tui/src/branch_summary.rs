@@ -484,6 +484,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::future::Future;
     use std::pin::Pin;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[tokio::test]
@@ -564,6 +565,7 @@ mod tests {
         );
         assert!(!runner.saw(&["git", "remote", "show", "origin"]));
         assert!(!runner.saw(&["git", "remote", "show", "-n", "origin"]));
+        assert!(runner.saw_local_only_env(&["git", "remote"]));
     }
 
     #[tokio::test]
@@ -677,6 +679,8 @@ mod tests {
                 [
                     "-c".to_string(),
                     codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
                 ],
             );
         }
@@ -697,7 +701,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<(Vec<String>, HashMap<String, Option<String>>)>>,
     }
 
     impl FakeRunner {
@@ -716,6 +720,8 @@ mod tests {
                     [
                         "-c".to_string(),
                         codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
                     ],
                 );
             }
@@ -723,7 +729,33 @@ mod tests {
                 .lock()
                 .expect("seen lock")
                 .iter()
-                .any(|seen| seen == &argv)
+                .any(|(seen, _)| seen == &argv)
+        }
+
+        fn saw_local_only_env(&self, argv: &[&str]) -> bool {
+            let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+            if argv.first().map(String::as_str) == Some("git") {
+                argv.splice(
+                    1..1,
+                    [
+                        "-c".to_string(),
+                        codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
+                    ],
+                );
+            }
+
+            self.seen
+                .lock()
+                .expect("seen lock")
+                .iter()
+                .any(|(seen, env)| {
+                    seen == &argv
+                        && env.get("GIT_ALLOW_PROTOCOL") == Some(&Some(String::new()))
+                        && env.get("GIT_NO_LAZY_FETCH") == Some(&Some("1".to_string()))
+                        && env.get("GIT_OPTIONAL_LOCKS") == Some(&Some("0".to_string()))
+                })
         }
     }
 
@@ -741,7 +773,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("seen lock")
-                .push(command.argv.clone());
+                .push((command.argv.clone(), command.env.clone()));
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses
