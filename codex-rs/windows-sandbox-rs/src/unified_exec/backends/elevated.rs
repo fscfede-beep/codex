@@ -15,7 +15,7 @@ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::runner_client::RunnerTransport;
 use crate::runner_client::retry_runner_spawn_once;
 use crate::runner_client::spawn_runner_transport;
-use crate::spawn_prep::prepare_elevated_spawn_context_for_permissions;
+use crate::spawn_prep::prepare_elevated_spawn_context_for_permissions_with_destructive;
 use anyhow::Result;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -165,6 +165,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     deny_write_paths_override: &[AbsolutePathBuf],
     tty: bool,
     stdin_open: bool,
+    allow_destructive_filesystem_effects: bool,
     private_desktop_name: Option<String>,
 ) -> Result<SpawnedProcess> {
     let deny_read_paths_override = deny_read_paths_override
@@ -180,7 +181,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
             permission_profile,
             workspace_roots,
         )?;
-    let elevated = prepare_elevated_spawn_context_for_permissions(
+    let elevated = prepare_elevated_spawn_context_for_permissions_with_destructive(
         permissions.clone(),
         codex_home,
         cwd,
@@ -193,6 +194,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         &deny_write_paths_override,
         proxy_enforced,
         proxy_settings_mode,
+        allow_destructive_filesystem_effects,
     )?;
 
     let sandbox_creds = elevated.sandbox_creds;
