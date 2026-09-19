@@ -133,7 +133,22 @@ pub fn parse_shell_lc_plain_commands(command: &[String]) -> Option<Vec<Vec<Strin
 /// syntax tree. Dynamic words and redirections are omitted. This is suitable
 /// for identifying dangerous literal commands, but must not be used to prove
 /// that a command is safe.
-pub(crate) fn parse_shell_lc_literal_commands(command: &[String]) -> Option<Vec<Vec<String>>> {
+const MAX_LITERAL_SHELL_NESTING: usize = 4;
+
+/// Extracts literal command invocations from a shell wrapper, recursively
+/// descending into nested \`sh|bash|zsh -c/-lc\` bodies up to a small depth.
+///
+/// This is intentionally a *detection* primitive: literal words may be
+/// incomplete when variables, substitutions, globs, or other dynamic syntax
+/// are present, so callers must never use its output to grant an allow decision.
+pub fn parse_shell_lc_literal_commands(command: &[String]) -> Option<Vec<Vec<String>>> {
+    parse_shell_lc_literal_commands_with_depth(command, 0)
+}
+
+fn parse_shell_lc_literal_commands_with_depth(
+    command: &[String],
+    depth: usize,
+) -> Option<Vec<Vec<String>>> {
     let (_, script) = extract_bash_command(command)?;
     let tree = try_parse_shell(script)?;
     let root = tree.root_node();
@@ -156,7 +171,19 @@ pub(crate) fn parse_shell_lc_literal_commands(command: &[String]) -> Option<Vec<
         }
     }
 
-    Some(commands)
+    if depth >= MAX_LITERAL_SHELL_NESTING {
+        return Some(commands);
+    }
+
+    let mut expanded = Vec::with_capacity(commands.len());
+    for command in commands {
+        expanded.push(command.clone());
+        if let Some(nested) = parse_shell_lc_literal_commands_with_depth(&command, depth + 1) {
+            expanded.extend(nested);
+        }
+    }
+
+    Some(expanded)
 }
 
 fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Vec<String>> {
