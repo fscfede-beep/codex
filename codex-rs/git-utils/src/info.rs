@@ -426,6 +426,7 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         let mut command = Command::new(self.git);
         command
             .envs(crate::local_only_git_env())
+            .args(["-c", "core.sshCommand="])
             .args(args)
             .current_dir(self.cwd)
             .kill_on_drop(true);
@@ -455,6 +456,7 @@ async fn run_git_command_with_timeout_from(
         // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
         .args(["-c", fsmonitor.git_config_arg()])
+        .args(["-c", "core.sshCommand="])
         .args(args)
         .current_dir(cwd)
         .kill_on_drop(true);
@@ -1119,7 +1121,9 @@ mod tests {
                 "config --null --get core.fsmonitor".to_string(),
                 "config --null --type=bool --fixed-value --get core.fsmonitor /tmp/fsmonitor-helper"
                     .to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=false status --porcelain"),
+                format!(
+                    "-c {disabled_hooks} -c core.fsmonitor=false -c core.sshCommand= status --porcelain"
+                ),
             ]
         );
     }
@@ -1206,7 +1210,9 @@ mod tests {
             vec![
                 "config --null --get core.fsmonitor".to_string(),
                 "version --build-options".to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=true status --porcelain"),
+                format!(
+                    "-c {disabled_hooks} -c core.fsmonitor=true -c core.sshCommand= status --porcelain"
+                ),
             ]
         );
     }
