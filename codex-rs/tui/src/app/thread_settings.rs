@@ -191,7 +191,53 @@ impl App {
         &mut self,
         thread_id: ThreadId,
         settings: &ThreadSettings,
-    ) {
+    ) -> bool {
+        let cached_active_permission_profile = if let Some(channel) =
+            self.thread_event_channels.get(&thread_id)
+        {
+            channel
+                .store
+                .lock()
+                .await
+                .session
+                .as_ref()
+                .and_then(|session| session.active_permission_profile.clone())
+        } else if self.primary_thread_id == Some(thread_id) {
+            self.primary_session_configured
+                .as_ref()
+                .and_then(|session| session.active_permission_profile.clone())
+        } else if let Some(blank) = self.agents_overview.blank_sessions.get(&thread_id) {
+            blank.session.active_permission_profile.clone()
+        } else if self.chat_widget.thread_id() == Some(thread_id) {
+            self.chat_widget.config_ref().permissions.active_permission_profile()
+        } else {
+            None
+        };
+
+        let incoming_permission_profile =
+            PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &settings.sandbox_policy.to_core(),
+                settings.cwd.as_path(),
+            );
+        if rejects_unconfirmed_named_profile_full_access(
+            cached_active_permission_profile.as_ref(),
+            settings.active_permission_profile.as_ref(),
+            &incoming_permission_profile,
+            self.pending_server_profiles.get(&thread_id),
+        ) {
+            tracing::error!(
+                thread_id = %thread_id,
+                "rejecting unconfirmed full-access thread settings update over a named permission profile"
+            );
+            if self.chat_widget.thread_id() == Some(thread_id) {
+                self.chat_widget.add_error_message(
+                    "Blocked an unconfirmed Full Access permission change; select Full Access explicitly to continue."
+                        .to_string(),
+                );
+            }
+            return false;
+        }
+
         if let Some(blank) = self.agents_overview.blank_sessions.get_mut(&thread_id) {
             apply_thread_settings_to_session(&mut blank.session, settings);
         }
@@ -207,6 +253,7 @@ impl App {
                 apply_thread_settings_to_session(session, settings);
             }
         }
+        true
     }
 
     pub(super) async fn send_thread_settings_update(
@@ -238,6 +285,85 @@ impl App {
                 false
             }
         }
+    }
+}
+
+fn rejects_unconfirmed_named_profile_full_access(
+    current_active_permission_profile: Option<&ActivePermissionProfile>,
+    incoming_active_permission_profile: Option<&ActivePermissionProfile>,
+    incoming_permission_profile: &PermissionProfile,
+    pending_selection: Option<&PermissionProfileSelection>,
+) -> bool {
+    let current_is_named = current_active_permission_profile
+        .is_some_and(|profile| !profile.id.starts_with(':'));
+    if !current_is_named {
+        return false;
+    }
+
+    let incoming_is_full_access = incoming_active_permission_profile
+        .is_some_and(|profile| profile.id == BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS)
+        || matches!(incoming_permission_profile, PermissionProfile::Disabled);
+    if !incoming_is_full_access {
+        return false;
+    }
+
+    !pending_selection.is_some_and(|selection| {
+        selection.profile_id == BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unconfirmed_full_access_over_named_profile() {
+        let current = ActivePermissionProfile::new("colleague");
+        let danger = ActivePermissionProfile::new(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS);
+
+        assert!(rejects_unconfirmed_named_profile_full_access(
+            Some(&current),
+            Some(&danger),
+            &PermissionProfile::Disabled,
+            None,
+        ));
+    }
+
+    #[test]
+    fn accepts_explicit_full_access_selection_over_named_profile() {
+        let current = ActivePermissionProfile::new("colleague");
+        let danger = ActivePermissionProfile::new(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS);
+        let pending = PermissionProfileSelection {
+            profile_id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
+            approval_policy: None,
+            approvals_reviewer: None,
+            display_label: "Full Access".to_string(),
+        };
+
+        assert!(!rejects_unconfirmed_named_profile_full_access(
+            Some(&current),
+            Some(&danger),
+            &PermissionProfile::Disabled,
+            Some(&pending),
+        ));
+    }
+
+    #[test]
+    fn accepts_named_profile_updates_and_non_named_state() {
+        let current = ActivePermissionProfile::new("colleague");
+        let next = ActivePermissionProfile::new("review");
+        assert!(!rejects_unconfirmed_named_profile_full_access(
+            Some(&current),
+            Some(&next),
+            &PermissionProfile::read_only(),
+            None,
+        ));
+        assert!(!rejects_unconfirmed_named_profile_full_access(
+            None,
+            Some(&ActivePermissionProfile::new(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS)),
+            &PermissionProfile::Disabled,
+            None,
+        ));
     }
 }
 
