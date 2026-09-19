@@ -473,7 +473,7 @@ impl ToolOrchestrator {
                     sandbox: retry_sandbox,
                     sandbox_requested: retry_sandbox_requested,
                     permissions: &permissions,
-                    exec_server_permissions: permission_profile,
+                    exec_server_permissions: &permissions,
                     enforce_managed_network: managed_network_active,
                     manager: &sandbox_manager,
                     sandbox_cwd: &sandbox_policy_cwd,
