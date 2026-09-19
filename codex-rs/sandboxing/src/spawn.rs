@@ -25,6 +25,8 @@ pub struct WindowsSandboxSpawnRequest<'a> {
     pub network_proxy_restricting_sid: Option<&'a str>,
     pub proxy_settings_mode: WindowsSandboxProxySettingsMode,
     pub filesystem_overrides: Option<&'a WindowsSandboxFilesystemOverrides>,
+    /// Ephemeral approval-bound delete capability.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 /// Executor-native process launch request shared by local and exec-server execution.
@@ -91,6 +93,7 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess> 
                     }),
                     tty: request.tty,
                     stdin_open: request.stdin_open,
+                    allow_destructive_filesystem_effects: windows.allow_destructive_filesystem_effects,
                 },
             )
             .await
