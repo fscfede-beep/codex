@@ -130,6 +130,16 @@ fn unified_exec_options(
     }
 }
 
+fn requires_universal_process_scope(req: &UnifiedExecRequest) -> bool {
+    let Some(convention) = req.cwd.infer_path_convention() else {
+        return false;
+    };
+    req.turn_environment
+        .permission_profile()
+        .file_system_sandbox_policy()
+        .has_full_disk_write_access_for_convention(Some(convention))
+}
+
 fn is_destructive_filesystem_exec(req: &UnifiedExecRequest) -> bool {
     let platform = match req.turn_environment.executor_platform_os.as_deref() {
         Some("windows") => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Windows,
@@ -152,7 +162,7 @@ fn destructive_safe_additional_permissions(
     internal_permissions: Option<&AdditionalPermissionProfile>,
 ) -> Option<AdditionalPermissionProfile> {
     let merged = merge_permission_profiles(req.additional_permissions.as_ref(), internal_permissions);
-    if !is_destructive_filesystem_exec(req) {
+    if !is_destructive_filesystem_exec(req) && !requires_universal_process_scope(req) {
         return merged;
     }
     let mut restricted = merged?;
@@ -250,7 +260,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         &self,
         req: &UnifiedExecRequest,
     ) -> SandboxablePreference {
-        if is_destructive_filesystem_exec(req) {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
             SandboxablePreference::Require
         } else {
             self.sandbox_preference()
@@ -258,7 +268,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
     }
 
     fn escalate_on_failure_for_request(&self, req: &UnifiedExecRequest) -> bool {
-        if is_destructive_filesystem_exec(req) {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
             false
         } else {
             self.escalate_on_failure()
@@ -271,7 +281,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         permissions: &PermissionProfile,
         workspace_roots: &[PathUri],
     ) -> PermissionProfile {
-        if is_destructive_filesystem_exec(req) {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
             PermissionProfile::workspace_write_with_path_uris(
                 workspace_roots,
                 NetworkSandboxPolicy::Restricted,
