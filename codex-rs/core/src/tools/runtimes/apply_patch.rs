@@ -23,6 +23,8 @@ use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_sandboxing::SandboxType;
@@ -92,10 +94,19 @@ impl ApplyPatchRuntime {
             return None;
         }
 
-        let permissions = effective_permission_profile(
-            attempt.exec_server_permissions,
-            req.additional_permissions.as_ref(),
-        );
+        let permissions = if req.action.is_destructive() {
+            PermissionProfile::workspace_write_with_path_uris(
+                attempt.workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            effective_permission_profile(
+                attempt.exec_server_permissions,
+                req.additional_permissions.as_ref(),
+            )
+        };
         Some(FileSystemSandboxContext {
             permissions,
             cwd: attempt.sandbox_cwd.clone(),
@@ -153,6 +164,48 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 }
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
+    fn sandbox_preference_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: SandboxablePreference,
+    ) -> SandboxablePreference {
+        if req.action.is_destructive() {
+            SandboxablePreference::Require
+        } else {
+            base
+        }
+    }
+
+    fn escalate_on_failure_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: bool,
+    ) -> bool {
+        if req.action.is_destructive() {
+            false
+        } else {
+            base
+        }
+    }
+
+    fn permission_profile_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: &PermissionProfile,
+        workspace_roots: &[PathUri],
+    ) -> PermissionProfile {
+        if req.action.is_destructive() {
+            PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            base.clone()
+        }
+    }
+
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
         &req.turn_environment
     }
@@ -182,12 +235,16 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
                 update_file_mode: req.action.update_file_mode(),
                 // Only reject links when an otherwise-required sandbox was bypassed.
                 // Executor-managed sandboxes can have SandboxType::None.
-                follow_symlinks: attempt.sandbox_requested
-                    || !attempt.manager.should_sandbox(
-                        attempt.permissions,
-                        self.sandbox_preference(),
-                        attempt.enforce_managed_network,
-                    ),
+                follow_symlinks: if req.action.is_destructive() {
+                    false
+                } else {
+                    attempt.sandbox_requested
+                        || !attempt.manager.should_sandbox(
+                            attempt.permissions,
+                            self.sandbox_preference(),
+                            attempt.enforce_managed_network,
+                        )
+                },
             },
             &req.action.cwd,
             &mut stdout,
