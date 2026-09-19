@@ -132,7 +132,8 @@ fn base_git_command(cwd: &Path) -> Command {
         .arg("core.attributesFile=")
         .arg("-c")
         .arg("core.sshCommand=")
-        .envs(codex_git_utils::local_only_git_env())
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
     scrub_non_inheritable_env_vars(&mut command);
