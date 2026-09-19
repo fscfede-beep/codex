@@ -1,9 +1,12 @@
 use crate::acl::add_allow_ace;
+use crate::acl::add_deny_delete_ace;
 use crate::acl::add_deny_write_ace;
+use crate::acl::ensure_allow_destructive_aces;
 use crate::acl::allow_null_device;
 use crate::acl::ensure_allow_write_aces;
 use crate::allow::AllowDenyPaths;
 use crate::allow::compute_allow_paths_for_permissions;
+use crate::cap::destructive_cap_sid_for_root;
 use crate::cap::load_or_create_cap_sids;
 use crate::cap::workspace_write_cap_sid_for_root;
 use crate::cap::workspace_write_root_contains_path;
@@ -150,10 +153,35 @@ pub(crate) fn prepare_legacy_session_security(
     cwd: &Path,
     capability_roots: impl IntoIterator<Item = PathBuf>,
 ) -> Result<LegacySessionSecurity> {
+    prepare_legacy_session_security_with_destructive(
+        uses_write_capabilities,
+        /*allow_destructive_filesystem_effects*/ false,
+        codex_home,
+        cwd,
+        capability_roots,
+    )
+}
+
+pub(crate) fn prepare_legacy_session_security_with_destructive(
+    uses_write_capabilities: bool,
+    allow_destructive_filesystem_effects: bool,
+    codex_home: &Path,
+    cwd: &Path,
+    capability_roots: impl IntoIterator<Item = PathBuf>,
+) -> Result<LegacySessionSecurity> {
+    if allow_destructive_filesystem_effects && !uses_write_capabilities {
+        anyhow::bail!("destructive filesystem capability requires writable-root sandbox authority");
+    }
+
     let caps = load_or_create_cap_sids(codex_home)?;
     let (h_token, readonly_sid, readonly_sid_str, write_root_sids) = unsafe {
         if uses_write_capabilities {
-            let write_root_sids = root_capability_sids(codex_home, cwd, capability_roots)?;
+            let write_root_sids = root_capability_sids_with_destructive(
+                codex_home,
+                cwd,
+                capability_roots,
+                allow_destructive_filesystem_effects,
+            )?;
             if write_root_sids.is_empty() {
                 anyhow::bail!("workspace-write sandbox has no writable root capability SIDs");
             }
@@ -209,13 +237,31 @@ pub(crate) fn root_capability_sids(
     cwd: &Path,
     allow_paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<RootCapabilitySid>> {
+    root_capability_sids_with_destructive(
+        codex_home,
+        cwd,
+        allow_paths,
+        /*destructive*/ false,
+    )
+}
+
+pub(crate) fn root_capability_sids_with_destructive(
+    codex_home: &Path,
+    cwd: &Path,
+    allow_paths: impl IntoIterator<Item = PathBuf>,
+    destructive: bool,
+) -> Result<Vec<RootCapabilitySid>> {
     let mut roots: Vec<PathBuf> = allow_paths.into_iter().collect();
     roots.sort_by_key(|root| canonicalize_path(root.as_path()));
     roots.dedup_by(|a, b| canonicalize_path(a.as_path()) == canonicalize_path(b.as_path()));
 
     let mut out = Vec::with_capacity(roots.len());
     for root in roots {
-        let sid_str = workspace_write_cap_sid_for_root(codex_home, cwd, &root)?;
+        let sid_str = if destructive {
+            destructive_cap_sid_for_root(codex_home, &root)?
+        } else {
+            workspace_write_cap_sid_for_root(codex_home, cwd, &root)?
+        };
         let sid = LocalSid::from_string(&sid_str)?;
         out.push(RootCapabilitySid { root, sid, sid_str });
     }
@@ -274,12 +320,32 @@ pub(crate) fn apply_legacy_session_acl_rules(
     additional_deny_write_paths: &[PathBuf],
     acl_sids: LegacyAclSids<'_>,
 ) -> Result<()> {
+    apply_legacy_session_acl_rules_with_destructive(
+        permissions,
+        codex_home,
+        current_dir,
+        env_map,
+        additional_deny_read_paths,
+        additional_deny_write_paths,
+        acl_sids,
+        /*destructive*/ false,
+    )
+}
+
+pub(crate) fn apply_legacy_session_acl_rules_with_destructive(
+    permissions: &ResolvedWindowsSandboxPermissions,
+    codex_home: &Path,
+    current_dir: &Path,
+    env_map: &HashMap<String, String>,
+    additional_deny_read_paths: &[PathBuf],
+    additional_deny_write_paths: &[PathBuf],
+    acl_sids: LegacyAclSids<'_>,
+    destructive: bool,
+) -> Result<()> {
     let AllowDenyPaths { allow, mut deny } =
         compute_allow_paths_for_permissions(permissions, current_dir, env_map);
     unsafe {
         for path in additional_deny_write_paths {
-            // Explicit carveouts must exist before the command starts so the
-            // sandbox cannot create them under a writable parent first.
             if !path.exists() {
                 std::fs::create_dir_all(path)
                     .with_context(|| format!("create deny-write path {}", path.display()))?;
@@ -295,7 +361,12 @@ pub(crate) fn apply_legacy_session_acl_rules(
                 let Some(root_sid) = matching_root_capability(p, acl_sids.write_root_sids) else {
                     continue;
                 };
-                let _ = ensure_allow_write_aces(p, &[root_sid.sid.as_ptr()]);
+                if destructive {
+                    let _ = ensure_allow_destructive_aces(p, &[root_sid.sid.as_ptr()]);
+                } else {
+                    let _ = ensure_allow_write_aces(p, &[root_sid.sid.as_ptr()]);
+                    let _ = add_deny_delete_ace(p, root_sid.sid.as_ptr());
+                }
             }
         }
         for p in &deny {
@@ -360,6 +431,43 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
     proxy_enforced: bool,
     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
 ) -> Result<ElevatedSpawnContext> {
+    prepare_elevated_spawn_context_for_permissions_with_destructive(
+        permissions,
+        codex_home,
+        cwd,
+        env_map,
+        command,
+        read_roots_override,
+        read_roots_include_platform_defaults,
+        write_roots_override,
+        deny_read_paths_override,
+        deny_write_paths_override,
+        proxy_enforced,
+        proxy_settings_mode,
+        /*allow_destructive_filesystem_effects*/ false,
+    )
+}
+
+pub(crate) fn prepare_elevated_spawn_context_for_permissions_with_destructive(
+    permissions: ResolvedWindowsSandboxPermissions,
+    codex_home: &Path,
+    cwd: &Path,
+    env_map: &mut HashMap<String, String>,
+    command: &[String],
+    read_roots_override: Option<&[PathBuf]>,
+    read_roots_include_platform_defaults: bool,
+    write_roots_override: Option<&[PathBuf]>,
+    deny_read_paths_override: &[PathBuf],
+    deny_write_paths_override: &[PathBuf],
+    proxy_enforced: bool,
+    proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+    allow_destructive_filesystem_effects: bool,
+) -> Result<ElevatedSpawnContext> {
+    if allow_destructive_filesystem_effects
+        && !permissions.uses_write_capabilities_for_cwd(cwd, env_map)
+    {
+        anyhow::bail!("destructive filesystem capability requires writable-root sandbox authority");
+    }
     normalize_null_device_env(env_map);
     ensure_non_interactive_pager(env_map);
     inherit_path_env(env_map);
@@ -418,7 +526,12 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
     )?;
     let caps = load_or_create_cap_sids(codex_home)?;
     let (psid_to_use, cap_sids) = if uses_write_capabilities {
-        let cap_sids = root_capability_sids(codex_home, cwd, effective_write_roots)?
+        let cap_sids = root_capability_sids_with_destructive(
+            codex_home,
+            cwd,
+            effective_write_roots,
+            allow_destructive_filesystem_effects,
+        )?
             .into_iter()
             .map(|root_sid| root_sid.sid_str)
             .collect::<Vec<_>>();
