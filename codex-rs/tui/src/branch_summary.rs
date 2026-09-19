@@ -11,6 +11,8 @@
 //! without blocking the rest of the UI.
 
 #[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::path::Path;
 
@@ -567,6 +569,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_git_commands_override_repository_ssh_configuration() {
+        let runner = FakeRunner::new(vec![response(
+            &["git", "remote"],
+            /*exit_code*/ 0,
+            "origin\n",
+        )]);
+
+        let output = run_git_command(&runner, Path::new("/repo"), &["remote"])
+            .await
+            .expect("git command output");
+
+        assert!(output.success());
+        assert!(runner.saw(&["git", "remote"]));
+        assert!(runner.saw_local_only_env(&["git", "remote"]));
+    }
+
+    #[tokio::test]
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
             &["gh", "pr", "view", "--json", "number,url,state"],
@@ -677,6 +696,7 @@ mod tests {
                 [
                     "-c".to_string(),
                     codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
                     "core.sshCommand=".to_string(),
                 ],
             );
@@ -698,7 +718,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<(Vec<String>, HashMap<String, Option<String>>)>>,
     }
 
     impl FakeRunner {
@@ -725,7 +745,32 @@ mod tests {
                 .lock()
                 .expect("seen lock")
                 .iter()
-                .any(|seen| seen == &argv)
+                .any(|(seen, _)| seen == &argv)
+        }
+
+        fn saw_local_only_env(&self, argv: &[&str]) -> bool {
+            let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+            if argv.first().map(String::as_str) == Some("git") {
+                argv.splice(
+                    1..1,
+                    [
+                        "-c".to_string(),
+                        codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
+                    ],
+                );
+            }
+            self.seen
+                .lock()
+                .expect("seen lock")
+                .iter()
+                .any(|(seen, env)| {
+                    seen == &argv
+                        && env.get("GIT_OPTIONAL_LOCKS") == Some(&Some("0".to_string()))
+                        && env.get("GIT_ALLOW_PROTOCOL") == Some(&Some(String::new()))
+                        && env.get("GIT_NO_LAZY_FETCH") == Some(&Some("1".to_string()))
+                })
         }
     }
 
@@ -743,7 +788,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("seen lock")
-                .push(command.argv.clone());
+                .push((command.argv.clone(), command.env.clone()));
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses
