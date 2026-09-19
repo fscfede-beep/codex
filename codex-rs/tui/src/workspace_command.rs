@@ -49,6 +49,7 @@ pub(crate) struct WorkspaceCommand {
     pub(crate) disable_output_cap: bool,
 }
 
+
 impl WorkspaceCommand {
     /// Creates a workspace command with conservative defaults for metadata probes.
     pub(crate) fn new(argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -65,6 +66,12 @@ impl WorkspaceCommand {
     /// Creates a Git command that is restricted to already-local repository data.
     pub(crate) fn local_only_git(argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let mut command = Self::new(argv);
+        if command.argv.first().map(String::as_str) == Some("git") {
+            command.argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
         for (key, value) in codex_git_utils::local_only_git_env() {
             command = command.env(key, value);
         }
@@ -220,5 +227,34 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
                 stderr: response.stderr,
             })
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceCommand;
+
+    #[test]
+    fn local_only_git_blocks_repository_ssh_configuration() {
+        let command = WorkspaceCommand::local_only_git(["git", "remote", "show", "origin"]);
+
+        assert_eq!(
+            command.argv,
+            vec![
+                "git".to_string(),
+                "-c".to_string(),
+                "core.sshCommand=".to_string(),
+                "remote".to_string(),
+                "show".to_string(),
+                "origin".to_string(),
+            ]
+        );
+        assert_eq!(
+            command.env.get("GIT_ALLOW_PROTOCOL"),
+            Some(&Some(String::new()))
+        );
+        assert_eq!(
+            command.env.get("GIT_NO_LAZY_FETCH"),
+            Some(&Some("1".to_string()))
+        );
     }
 }
