@@ -46,6 +46,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
     proxy_routing_active: bool,
+    deny_filesystem_delete: bool,
 ) -> Result<()> {
     let (file_system_sandbox_policy, network_sandbox_policy) =
         permission_profile.to_runtime_permissions();
@@ -93,6 +94,29 @@ pub(crate) fn apply_permission_profile_to_current_thread(
         install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
     }
 
+    if deny_filesystem_delete {
+        install_filesystem_delete_landlock_rules_on_current_thread()?;
+    }
+
+    Ok(())
+}
+
+fn install_filesystem_delete_landlock_rules_on_current_thread() -> Result<()> {
+    // Landlock exposes delete/rename rights separately from ordinary write rights.
+    // Handle only these effects and provide no allow rules: the effective result is
+    // process-wide denial of unlink/rmdir/rename/link-across-dirs for this child.
+    let abi = ABI::V5;
+    let delete_access = AccessFs::RemoveDir | AccessFs::RemoveFile | AccessFs::Refer;
+    let ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(delete_access)?
+        .create()?
+        .set_no_new_privs(true);
+
+    let status = ruleset.restrict_self()?;
+    if status.ruleset == landlock::RulesetStatus::NotEnforced {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
     Ok(())
 }
 
