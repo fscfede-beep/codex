@@ -23,6 +23,8 @@ use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_sandboxing::SandboxType;
@@ -155,6 +157,21 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
         &req.turn_environment
+    }
+
+    fn sandbox_preference_for_request(
+        &self,
+        req: &ApplyPatchRequest,
+    ) -> SandboxablePreference {
+        if req.action.is_destructive() {
+            SandboxablePreference::Require
+        } else {
+            self.sandbox_preference()
+        }
+    }
+
+    fn escalate_on_failure_for_request(&self, req: &ApplyPatchRequest) -> bool {
+        !req.action.is_destructive() && self.escalate_on_failure()
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &ApplyPatchRequest) -> bool {
