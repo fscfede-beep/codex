@@ -155,12 +155,17 @@ impl ToolOrchestrator {
         let workspace_roots = environment.workspace_roots();
         let executor_managed_process_sandbox = tool.uses_executor_managed_process_sandbox(req);
         let permission_profile = environment.permission_profile();
-        let permissions = if executor_managed_process_sandbox {
+        let base_permissions = if executor_managed_process_sandbox {
             // Executor-native roots remain symbolic until the executor applies its own sandbox.
             permission_profile.clone()
         } else {
             environment.permission_profile_with_workspace_roots()
         };
+        let permissions = tool.permission_profile_for_attempt(
+            req,
+            &base_permissions,
+            workspace_roots,
+        );
         let file_system_sandbox_policy = permissions.file_system_sandbox_policy();
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
@@ -261,7 +266,10 @@ impl ToolOrchestrator {
         } else {
             turn_ctx.network.is_some()
         };
-        let sandbox_preference = tool.sandbox_preference();
+        let sandbox_preference =
+            tool.sandbox_preference_for_attempt(req, tool.sandbox_preference());
+        let allow_escalation =
+            tool.escalate_on_failure_for_attempt(req, tool.escalate_on_failure());
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
@@ -284,6 +292,16 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+        if sandbox_requested
+            && !executor_managed_process_sandbox
+            && sandbox_preference == SandboxablePreference::Require
+            && initial_sandbox == SandboxType::None
+        {
+            return Err(ToolError::Rejected(
+                "required filesystem/process sandbox is unavailable; refusing to run without it"
+                    .to_string(),
+            ));
+        }
 
         let sandbox_policy_cwd = tool
             .sandbox_cwd(req)
@@ -358,7 +376,7 @@ impl ToolOrchestrator {
                     );
                     return Err(ToolError::Codex(err));
                 }
-                if !tool.escalate_on_failure() {
+                if !allow_escalation {
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,
