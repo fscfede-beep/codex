@@ -93,6 +93,37 @@ async fn named_permission_profile_rejects_legacy_sandbox_override() {
     );
 }
 #[tokio::test]
+async fn named_permission_profile_survives_cwd_retargeting() {
+    let mut configuration = make_session_configuration_for_tests().await;
+    configuration
+        .permission_profile_state
+        .set_permission_profile_snapshot(PermissionProfileSnapshot::active(
+            PermissionProfile::workspace_write(),
+            ActivePermissionProfile::new("workspace-dev"),
+        ))
+        .expect("named workspace profile should be valid");
+
+    let new_cwd = AbsolutePathBuf::from_absolute_path("/tmp/retargeted")
+        .expect("test cwd should be absolute");
+    let update = SessionSettingsUpdate {
+        environments: Some(TurnEnvironmentSelections::new(new_cwd, Vec::new())),
+        ..Default::default()
+    };
+
+    let updated = configuration
+        .apply(&update, &[])
+        .expect("cwd retargeting should preserve a named profile");
+
+    assert_eq!(
+        updated.permission_profile_state
+            .active_permission_profile()
+            .expect("active profile")
+            .id,
+        "workspace-dev"
+    );
+}
+
+#[tokio::test]
 async fn proposed_permission_profile_is_checked_before_step_settings() {
     let mut configuration = make_session_configuration_for_tests().await;
     let permission = Constrained::allow_only(PermissionProfile::read_only());
