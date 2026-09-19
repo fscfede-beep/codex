@@ -34,7 +34,8 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_path_uri::PathUri;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -232,7 +233,10 @@ fn validate_managed_storage_path(
 ) -> Result<(), JSONRPCErrorError> {
     use std::path::Component;
 
-    if path.components().any(|component| component == Component::ParentDir) {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
         return Err(invalid_request(
             "filesystem mutation path contains parent traversal",
         ));
@@ -255,9 +259,7 @@ fn validate_managed_storage_path(
     })?;
 
     let root_metadata = std::fs::symlink_metadata(managed_root).map_err(|err| {
-        invalid_request(format!(
-            "cannot inspect managed attachments root: {err}"
-        ))
+        invalid_request(format!("cannot inspect managed attachments root: {err}"))
     })?;
     if !root_metadata.is_dir() || managed_root_is_alias(&root_metadata) {
         return Err(invalid_request(
@@ -309,10 +311,7 @@ fn validate_managed_storage_path(
     Ok(())
 }
 
-fn managed_storage_path_contains_alias(
-    existing: &Path,
-    canonical_existing: &Path,
-) -> bool {
+fn managed_storage_path_contains_alias(existing: &Path, canonical_existing: &Path) -> bool {
     #[cfg(unix)]
     {
         canonical_existing != existing
