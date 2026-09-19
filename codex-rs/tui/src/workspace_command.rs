@@ -62,6 +62,21 @@ impl WorkspaceCommand {
         }
     }
 
+    /// Creates a Git workspace command with repository-controlled SSH config neutralized.
+    pub(crate) fn local_only_git(argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut command = Self::new(argv);
+        if command.argv.first().map(String::as_str) == Some("git") {
+            command.argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
+        for (key, value) in codex_git_utils::local_only_git_env() {
+            command = command.env(key, value);
+        }
+        command
+    }
+
     /// Sets the command working directory.
     pub(crate) fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
