@@ -292,6 +292,16 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+        if sandbox_requested
+            && !executor_managed_process_sandbox
+            && sandbox_preference == SandboxablePreference::Require
+            && initial_sandbox == SandboxType::None
+        {
+            return Err(ToolError::Rejected(
+                "required filesystem/process sandbox is unavailable; refusing to run without it"
+                    .to_string(),
+            ));
+        }
 
         let sandbox_policy_cwd = tool
             .sandbox_cwd(req)
