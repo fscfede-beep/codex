@@ -594,17 +594,19 @@ async fn execute_verified_patch(
     );
     emitter.begin(event_ctx).await;
 
+    let destructive_targets = apply.action.destructive_targets().to_vec();
     let request = ApplyPatchRequest {
         turn_environment,
         action: apply.action,
         file_paths,
         changes: Arc::new(changes),
+        destructive_targets,
         exec_approval_requirement: apply.exec_approval_requirement,
         additional_permissions: effective_additional_permissions.additional_permissions,
         permissions_preapproved: effective_additional_permissions.permissions_preapproved,
     };
     let mut orchestrator = ToolOrchestrator::new();
-    let mut runtime = ApplyPatchRuntime::new();
+    let mut runtime = ApplyPatchRuntime::new_for_action(&request.action);
     let result = orchestrator
         .run(&mut runtime, &request, &tool_ctx)
         .await

@@ -358,3 +358,32 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
         })
     );
 }
+
+#[test]
+fn destructive_patch_runtime_requires_sandbox_and_disables_escalation_retry() {
+    let path =
+        PathUri::from_host_native_path(std::env::temp_dir().join("destructive-overwrite.txt"))
+            .expect("temp path URI");
+    let action = ApplyPatchAction::new_add_for_test(&path, "replacement".to_string());
+    let runtime = ApplyPatchRuntime::new_for_action(&action);
+
+    assert!(action.is_destructive());
+    assert_eq!(runtime.sandbox_preference(), SandboxablePreference::Require);
+    assert!(!runtime.escalate_on_failure());
+}
+
+#[test]
+fn destructive_patch_execution_disables_symlink_following() {
+    // The execution phase must preserve the no-follow decision made by destructive
+    // target verification; re-enabling link traversal here would reopen the TOCTOU
+    // boundary after the identity check.
+    let path =
+        PathUri::from_host_native_path(std::env::temp_dir().join("destructive-no-follow.txt"))
+            .expect("temp path URI");
+    let action = ApplyPatchAction::new_add_for_test(&path, "replacement".to_string());
+    let runtime = ApplyPatchRuntime::new_for_action(&action);
+
+    assert!(action.is_destructive());
+    assert!(!runtime.destructive);
+}
+

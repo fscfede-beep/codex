@@ -17,12 +17,15 @@ use crate::tools::sandboxing::executor_windows_sandbox_selection;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchOptions;
+use codex_apply_patch::DestructivePatchTarget;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_sandboxing::SandboxType;
@@ -47,6 +50,7 @@ pub struct ApplyPatchRequest {
     pub action: ApplyPatchAction,
     pub file_paths: Vec<PathUri>,
     pub changes: Arc<std::collections::HashMap<PathBuf, FileChange>>,
+    pub destructive_targets: Vec<DestructivePatchTarget>,
     pub exec_approval_requirement: ExecApprovalRequirement,
     pub additional_permissions: Option<AdditionalPermissionProfile>,
     pub permissions_preapproved: bool,
@@ -55,6 +59,7 @@ pub struct ApplyPatchRequest {
 #[derive(Default)]
 pub struct ApplyPatchRuntime {
     committed_delta: AppliedPatchDelta,
+    destructive: bool,
 }
 
 #[derive(Debug)]
@@ -66,6 +71,13 @@ pub struct ApplyPatchRuntimeOutput {
 impl ApplyPatchRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_for_action(action: &ApplyPatchAction) -> Self {
+        Self {
+            committed_delta: AppliedPatchDelta::default(),
+            destructive: action.is_destructive(),
+        }
     }
 
     pub fn committed_delta(&self) -> &AppliedPatchDelta {
@@ -92,10 +104,22 @@ impl ApplyPatchRuntime {
             return None;
         }
 
-        let permissions = effective_permission_profile(
-            attempt.exec_server_permissions,
-            req.additional_permissions.as_ref(),
-        );
+        let permissions = if self.destructive {
+            // A destructive patch must never inherit full-disk/Disabled ambient authority
+            // or additional session/turn filesystem grants. Reconstruct a minimal managed
+            // workspace-write profile from executor-owned roots only.
+            PermissionProfile::workspace_write_with_path_uris(
+                attempt.workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            effective_permission_profile(
+                attempt.exec_server_permissions,
+                req.additional_permissions.as_ref(),
+            )
+        };
         Some(FileSystemSandboxContext {
             permissions,
             cwd: attempt.sandbox_cwd.clone(),
@@ -116,10 +140,15 @@ impl ApplyPatchRuntime {
 
 impl Sandboxable for ApplyPatchRuntime {
     fn sandbox_preference(&self) -> SandboxablePreference {
-        SandboxablePreference::Auto
+        if self.destructive {
+            SandboxablePreference::Require
+        } else {
+            SandboxablePreference::Auto
+        }
     }
+
     fn escalate_on_failure(&self) -> bool {
-        true
+        !self.destructive
     }
 }
 
@@ -177,26 +206,35 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_options(
-            &req.action.patch,
-            ApplyPatchOptions {
-                update_file_mode: req.action.update_file_mode(),
-                // Only reject links when an otherwise-required sandbox was bypassed.
-                // Executor-managed sandboxes can have SandboxType::None.
-                follow_symlinks: attempt.sandbox_requested
-                    || !attempt.manager.should_sandbox(
-                        attempt.permissions,
-                        self.sandbox_preference(),
-                        attempt.enforce_managed_network,
-                    ),
-            },
-            &req.action.cwd,
-            &mut stdout,
-            &mut stderr,
-            fs.as_ref(),
-            sandbox.as_ref(),
-        )
-        .await;
+        let options = ApplyPatchOptions {
+            update_file_mode: req.action.update_file_mode(),
+            // Destructive apply_patch uses no-follow execution semantics.
+            follow_symlinks: !self.destructive,
+        };
+        let result = if self.destructive {
+            codex_apply_patch::apply_patch_with_destructive_targets(
+                &req.action.patch,
+                options,
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+                &req.destructive_targets,
+            )
+            .await
+        } else {
+            codex_apply_patch::apply_patch_with_options(
+                &req.action.patch,
+                options,
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+            )
+            .await
+        };
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let failed = result.is_err();
@@ -241,3 +279,4 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
 #[cfg(test)]
 #[path = "apply_patch_tests.rs"]
 mod tests;
+

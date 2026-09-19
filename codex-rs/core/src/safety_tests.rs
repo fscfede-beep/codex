@@ -452,3 +452,140 @@ fn missing_project_dot_codex_config_requires_approval() {
         SafetyCheck::AskUser,
     );
 }
+
+#[test]
+fn destructive_patch_is_never_auto_approved() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().abs();
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let action = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.join("existing.txt")),
+        "replacement".to_string(),
+    );
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let policy = permission_profile.file_system_sandbox_policy();
+
+    assert!(action.is_destructive());
+    assert_eq!(
+        assess_patch_safety(
+            &action,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &policy,
+            &local_context(&cwd_uri),
+            PatchSandboxRoute::ExecutorManaged,
+        ),
+        SafetyCheck::AskUser,
+    );
+}
+
+#[test]
+fn destructive_patch_with_disabled_profile_uses_workspace_scope() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().abs();
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let inside = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.join("existing.txt")),
+        "replacement".to_string(),
+    );
+    let outside = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.parent().unwrap().join("outside.txt")),
+        "replacement".to_string(),
+    );
+    let permission_profile = PermissionProfile::Disabled;
+    let file_system_sandbox_policy = permission_profile.file_system_sandbox_policy();
+
+    assert!(inside.is_destructive());
+    assert!(matches!(
+        assess_patch_safety(
+            &inside,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &file_system_sandbox_policy,
+            &local_context(&cwd_uri),
+            PatchSandboxRoute::ExecutorManaged,
+        ),
+        SafetyCheck::AskUser
+    ));
+    assert_eq!(
+        assess_patch_safety(
+            &outside,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &file_system_sandbox_policy,
+            &local_context(&cwd_uri),
+            PatchSandboxRoute::ExecutorManaged,
+        ),
+        SafetyCheck::Reject {
+            reason: PATCH_REJECTED_OUTSIDE_PROJECT_REASON.to_string(),
+        }
+    );
+}
+
+#[test]
+fn destructive_patch_rejects_external_filesystem_authority() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().abs();
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let action = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.join("existing.txt")),
+        "replacement".to_string(),
+    );
+    let permission_profile = PermissionProfile::External {
+        network: NetworkSandboxPolicy::Enabled,
+    };
+    let policy = FileSystemSandboxPolicy::external_sandbox();
+
+    assert_eq!(
+        assess_patch_safety(
+            &action,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &policy,
+            &local_context(&cwd_uri),
+            PatchSandboxRoute::Platform(WindowsSandboxLevel::Disabled),
+        ),
+        SafetyCheck::Reject {
+            reason: "destructive apply_patch requires Codex-managed filesystem scope".to_string(),
+        }
+    );
+}
+
+#[test]
+fn destructive_patch_requires_workspace_root_even_with_disabled_profile() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().abs();
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let action = ApplyPatchAction::new_add_for_test(
+        &PathUri::from_abs_path(&cwd.join("existing.txt")),
+        "replacement".to_string(),
+    );
+    let empty_context = FileSystemSandboxPolicyContext {
+        cwd: &cwd_uri,
+        workspace_roots: &[],
+        user_home_dir: None,
+        temporary_directories: None,
+    };
+    let permission_profile = PermissionProfile::Disabled;
+    let policy = permission_profile.file_system_sandbox_policy();
+
+    assert_eq!(
+        assess_patch_safety(
+            &action,
+            AskForApproval::OnRequest,
+            &permission_profile,
+            &policy,
+            &empty_context,
+            PatchSandboxRoute::ExecutorManaged,
+        ),
+        SafetyCheck::Reject {
+            reason: "destructive apply_patch requires an explicit workspace root".to_string(),
+        }
+    );
+}
+

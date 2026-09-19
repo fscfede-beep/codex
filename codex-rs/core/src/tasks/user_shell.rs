@@ -11,12 +11,14 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::exec::ExecCapturePolicy;
+use crate::exec::ExecParams;
 use crate::exec::StdoutStream;
+use crate::exec::build_exec_request;
 use crate::exec::execute_exec_request;
 use crate::exec_env::create_env;
 use crate::exec_env::inject_apply_patch_env;
 use crate::exec_env::inject_session_env;
-use crate::sandboxing::ExecRequest;
+use crate::sandboxing::SandboxPermissions;
 use crate::session::TurnInput;
 use crate::session::turn_context::TurnContext;
 use crate::shell::Shell;
@@ -36,13 +38,13 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
-use codex_sandboxing::SandboxType;
 use codex_shell_command::parse_command::parse_command;
 use codex_thread_store::PersistContext;
 
 use super::SessionTask;
 use super::SessionTaskResult;
 use crate::session::session::Session;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 
 const USER_SHELL_TIMEOUT_MS: u64 = 60 * 60 * 1000; // 1 hour
@@ -155,16 +157,10 @@ pub(crate) async fn execute_user_shell_command(
         .await;
         return;
     };
-    let shell_snapshot = turn_environment
-        .shell_snapshot(
-            &cwd,
-            &display_command,
-            environment_shell,
-            &turn_context.config,
-            /*sandbox*/ None,
-        )
-        .await;
-    let shell_snapshot_location = shell_snapshot.as_ref().map(|snapshot| snapshot.path());
+    // Do not run an unsandboxed shell snapshot preflight for the explicit user-shell path.
+    // The actual command below is routed through build_exec_request(), which selects the
+    // environment-owned sandbox before process creation.
+    let shell_snapshot_location = None;
     let shell_environment_policy = turn_environment.shell_environment_policy();
     let mut exec_env_map = create_env(shell_environment_policy, Some(session.thread_id));
     inject_session_env(&mut exec_env_map, session.session_id());
@@ -209,34 +205,53 @@ pub(crate) async fn execute_user_shell_command(
         )
         .await;
 
-    let permission_profile = PermissionProfile::Disabled;
-    let exec_env = ExecRequest {
-        command: exec_command.clone(),
-        cwd: cwd.clone().into(),
-        env: exec_env_map,
-        exec_server_env_config: None,
-        exec_server_shell_snapshot: None,
-        // `/shell` is the explicit full-access escape hatch, so it must not
-        // inherit a managed proxy from the surrounding session or turn.
-        network: None,
-        network_environment_id: None,
-        expiration: timeout_ms.unwrap_or(USER_SHELL_TIMEOUT_MS).into(),
-        capture_policy: ExecCapturePolicy::ShellTool,
-        sandbox: SandboxType::None,
-        windows_sandbox_policy_cwd: cwd.clone().into(),
-        windows_sandbox_workspace_roots: Vec::new(),
-        windows_sandbox_level: turn_context.windows_sandbox_level,
-        windows_sandbox_private_desktop: turn_context
-            .config
-            .permissions
-            .windows_sandbox_private_desktop,
-        permission_profile,
-        windows_sandbox_filesystem_overrides: None,
-        arg0: None,
-        exec_server_sandbox: None,
-        exec_server_enforce_managed_network: false,
-        exec_server_managed_network: None,
-        exec_server_network_proxy: None,
+    let permission_profile = match user_shell_permission_profile(
+        turn_environment.permission_profile(),
+        turn_environment.workspace_roots(),
+    ) {
+        Ok(profile) => profile,
+        Err(message) => {
+            send_user_shell_error(&session, turn_context.as_ref(), message).await;
+            return;
+        }
+    };
+
+    let exec_env = match build_exec_request(
+        ExecParams {
+            command: exec_command.clone(),
+            cwd: cwd.clone(),
+            env: exec_env_map,
+            network: None,
+            network_environment_id: None,
+            expiration: timeout_ms.unwrap_or(USER_SHELL_TIMEOUT_MS).into(),
+            capture_policy: ExecCapturePolicy::ShellTool,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            windows_sandbox_level: turn_context.windows_sandbox_level,
+            windows_sandbox_private_desktop: turn_context
+                .config
+                .permissions
+                .windows_sandbox_private_desktop,
+            justification: None,
+            arg0: None,
+        },
+        &permission_profile,
+        &cwd,
+        turn_environment.workspace_roots(),
+        &turn_context.config.codex_linux_sandbox_exe,
+        &turn_context.config.codex_self_exe,
+        turn_context.config.permissions.windows_sandbox_type,
+        turn_context.config.use_legacy_landlock,
+    ) {
+        Ok(request) => request,
+        Err(err) => {
+            send_user_shell_error(
+                &session,
+                turn_context.as_ref(),
+                &format!("failed to prepare sandboxed shell command: {err}"),
+            )
+            .await;
+            return;
+        }
     };
 
     let stdout_stream = Some(StdoutStream {
@@ -392,6 +407,35 @@ async fn send_user_shell_error(session: &Session, turn_context: &TurnContext, me
         .await;
 }
 
+fn user_shell_permission_profile(
+    configured: &PermissionProfile,
+    workspace_roots: &[codex_utils_path_uri::PathUri],
+) -> Result<PermissionProfile, &'static str> {
+    match configured {
+        PermissionProfile::External { .. } => Err(
+            "user shell command requires a Codex-managed filesystem sandbox; external sandbox authority is not accepted",
+        ),
+        PermissionProfile::Disabled
+        | PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Unrestricted,
+            ..
+        } => {
+            if workspace_roots.is_empty() {
+                return Err(
+                    "user shell command requires at least one workspace root when narrowing full filesystem access",
+                );
+            }
+            Ok(PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                configured.network_sandbox_policy(),
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            ))
+        }
+        PermissionProfile::Managed { .. } => Ok(configured.clone()),
+    }
+}
+
 fn prepare_user_shell_exec_command(
     display_command: &[String],
     shell: &Shell,
@@ -482,6 +526,72 @@ async fn persist_user_shell_output(
     session
         .inject_no_new_turn(vec![output_item], Some(turn_context))
         .await;
+}
+
+#[cfg(test)]
+mod shell_safety_tests {
+    use super::*;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_utils_path_uri::PathUri;
+    use tempfile::tempdir;
+
+    #[test]
+    fn full_access_shell_is_narrowed_to_workspace_write() {
+        let root = tempdir().unwrap();
+        let root_uri = PathUri::from_host_native_path(root.path()).unwrap();
+        let profile = user_shell_permission_profile(
+            &PermissionProfile::Disabled,
+            std::slice::from_ref(&root_uri),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            profile,
+            PermissionProfile::Managed {
+                file_system: ManagedFileSystemPermissions::Restricted { .. },
+                network: NetworkSandboxPolicy::Enabled | NetworkSandboxPolicy::Restricted,
+            }
+        ));
+    }
+
+    #[test]
+    fn unrestricted_managed_shell_is_narrowed_to_workspace_write() {
+        let root = tempdir().unwrap();
+        let root_uri = PathUri::from_host_native_path(root.path()).unwrap();
+        let configured = PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Unrestricted,
+            network: NetworkSandboxPolicy::Restricted,
+        };
+        let profile =
+            user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri)).unwrap();
+
+        assert!(matches!(
+            profile,
+            PermissionProfile::Managed {
+                file_system: ManagedFileSystemPermissions::Restricted { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn external_shell_authority_is_rejected() {
+        let root = tempdir().unwrap();
+        let root_uri = PathUri::from_host_native_path(root.path()).unwrap();
+        let configured = PermissionProfile::External {
+            network: NetworkSandboxPolicy::Enabled,
+        };
+
+        assert!(
+            user_shell_permission_profile(&configured, std::slice::from_ref(&root_uri)).is_err()
+        );
+    }
+
+    #[test]
+    fn full_access_shell_requires_workspace_root_for_narrowing() {
+        let result = user_shell_permission_profile(&PermissionProfile::Disabled, &[]);
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(all(test, unix))]

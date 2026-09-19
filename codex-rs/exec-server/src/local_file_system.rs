@@ -7,7 +7,6 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -17,6 +16,42 @@ use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
+#[cfg(windows)]
+use std::ptr;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
@@ -234,14 +269,92 @@ impl LocalFileSystem {
         file_system.walk(path, options, sandbox).await
     }
 
+    async fn get_object_identity(
+        &self,
+        path: &PathUri,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<Option<FileSystemObjectIdentity>> {
+        if let Some(sandbox) = sandbox {
+            let policy = sandbox.permissions.file_system_sandbox_policy();
+            if !policy.can_write_path(path, &sandbox.policy_context()) {
+                return Ok(None);
+            }
+        }
+        let path = path.to_abs_path()?;
+        let metadata = std::fs::symlink_metadata(path.as_path())?;
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        {
+            return Ok(Some(FileSystemObjectIdentity::new(format!(
+                "unix:{:016x}:{:016x}",
+                metadata.dev(),
+                metadata.ino()
+            ))));
+        }
+        #[cfg(windows)]
+        {
+            let wide = path
+                .as_path()
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    FILE_READ_ATTRIBUTES | READ_CONTROL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    0,
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            let guard = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Ok(None);
+            }
+            let _guard = guard;
+            return Ok(Some(FileSystemObjectIdentity::new(format!(
+                "windows:{:08x}:{:08x}{:08x}",
+                info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+            ))));
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(None)
+        }
+    }
+
     async fn remove(
         &self,
         path: &PathUri,
         options: RemoveOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()> {
-        let (file_system, sandbox) = self.file_system_for_writes(sandbox)?;
-        file_system.remove(path, options, sandbox).await
+        let Some(sandbox) = sandbox else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "filesystem deletion requires an explicit scoped sandbox",
+            ));
+        };
+        sandbox.validate_file_system_paths_for_current_host()?;
+        if !sandbox.should_write_into_sandbox() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "filesystem deletion requires a restricted writable sandbox; unrestricted filesystem authority cannot delete",
+            ));
+        }
+        self.sandboxed()?.remove(path, options, Some(sandbox)).await
     }
 
     async fn copy(
@@ -331,6 +444,14 @@ impl ExecutorFileSystem for LocalFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
         Box::pin(LocalFileSystem::walk(self, path, options, sandbox))
+    }
+
+    fn get_object_identity<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Option<FileSystemObjectIdentity>> {
+        Box::pin(LocalFileSystem::get_object_identity(self, path, sandbox))
     }
 
     fn remove<'a>(
@@ -1303,6 +1424,63 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::os::unix::fs::symlink;
 
+    #[tokio::test]
+    async fn local_remove_rejects_missing_sandbox_without_deleting() -> io::Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let target = temp_dir.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let fs = LocalFileSystem::unsandboxed();
+        let path = PathUri::from_host_native_path(&target)?;
+        let result = fs
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.map_err(|err| err.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(std::fs::read_to_string(&target)?, "protected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_remove_rejects_disabled_sandbox_authority_without_deleting() -> io::Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let target = temp_dir.path().join("protected.txt");
+        std::fs::write(&target, "protected")?;
+        let cwd = PathUri::from_host_native_path(temp_dir.path())?;
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            codex_protocol::models::PermissionProfile::Disabled,
+            cwd.clone(),
+        );
+        let fs = LocalFileSystem::unsandboxed();
+        let path = PathUri::from_host_native_path(&target)?;
+        let result = fs
+            .remove(
+                &path,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                Some(&sandbox),
+            )
+            .await;
+        assert_eq!(
+            result.map_err(|err| err.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(std::fs::read_to_string(&target)?, "protected");
+        Ok(())
+    }
+
     #[test]
     fn resolve_existing_path_handles_symlink_parent_dotdot_escape() -> io::Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
@@ -1453,3 +1631,4 @@ mod walk_tests {
         Ok(())
     }
 }
+

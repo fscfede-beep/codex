@@ -63,6 +63,44 @@ pub fn assess_patch_safety(
         }
     };
 
+    if action.is_destructive() {
+        if matches!(permission_profile, PermissionProfile::External { .. }) {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires Codex-managed filesystem scope"
+                    .to_string(),
+            };
+        }
+        if context.workspace_roots.is_empty() {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an explicit workspace root".to_string(),
+            };
+        }
+        if rejects_sandbox_approval {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an approval-capable sandbox".to_string(),
+            };
+        }
+        // Full-disk/Disabled ambient authority must never widen destructive apply_patch.
+        // Recompute the candidate policy from the executor-owned workspace roots only.
+        let workspace_only_policy = FileSystemSandboxPolicy::workspace_write_with_path_uris(
+            context.workspace_roots,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ true,
+        );
+        if !is_write_patch_constrained_to_writable_paths(action, &workspace_only_policy, context) {
+            return SafetyCheck::Reject {
+                reason: PATCH_REJECTED_OUTSIDE_PROJECT_REASON.to_string(),
+            };
+        }
+        if !sandbox_available {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an enforceable filesystem sandbox"
+                    .to_string(),
+            };
+        }
+        return SafetyCheck::AskUser;
+    }
+
     // Even though the patch appears to be constrained to writable paths, it is
     // possible that paths in the patch are hard links to files outside the
     // writable roots, so we should still run `apply_patch` in a sandbox in that case.
@@ -142,3 +180,4 @@ fn is_write_patch_constrained_to_writable_paths(
 #[cfg(test)]
 #[path = "safety_tests.rs"]
 mod tests;
+

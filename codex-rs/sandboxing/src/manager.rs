@@ -4,6 +4,7 @@ use crate::bwrap::WSL1_BWRAP_WARNING;
 use crate::bwrap::is_wsl1;
 use crate::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use crate::landlock::create_linux_sandbox_command_args_for_permission_profile;
+use crate::landlock::create_linux_sandbox_command_args_for_permission_profile_with_delete_policy;
 use crate::policy_transforms::effective_permission_profile;
 use crate::policy_transforms::should_require_platform_sandbox;
 #[cfg(target_os = "windows")]
@@ -266,12 +267,25 @@ impl std::error::Error for SandboxTransformError {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SandboxManager {
+    deny_destructive_filesystem: bool,
     #[cfg(target_os = "macos")]
     seatbelt_profile: MacosSeatbeltProfile,
     #[cfg(target_os = "macos")]
     allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
+}
+
+impl Default for SandboxManager {
+    fn default() -> Self {
+        Self {
+            deny_destructive_filesystem: true,
+            #[cfg(target_os = "macos")]
+            seatbelt_profile: MacosSeatbeltProfile::default(),
+            #[cfg(target_os = "macos")]
+            allowed_symlinked_codex_home: None,
+        }
+    }
 }
 
 impl SandboxManager {
@@ -282,6 +296,7 @@ impl SandboxManager {
     /// Creates a manager that applies the narrower runtime profile required by filesystem helpers.
     pub fn for_file_system_helpers() -> Self {
         Self {
+            deny_destructive_filesystem: false,
             #[cfg(target_os = "macos")]
             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
             #[cfg(target_os = "macos")]
@@ -500,13 +515,14 @@ impl SandboxManager {
                     managed_network.is_some(),
                     is_wsl1(),
                 )?;
-                let mut args = create_linux_sandbox_command_args_for_permission_profile(
+                let mut args = create_linux_sandbox_command_args_for_permission_profile_with_delete_policy(
                     argv,
                     pending.native_command_cwd.as_path(),
                     &pending.effective_permission_profile,
                     pending.native_sandbox_policy_cwd.as_path(),
                     use_legacy_landlock,
                     managed_network.as_ref(),
+                    self.deny_destructive_filesystem,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));

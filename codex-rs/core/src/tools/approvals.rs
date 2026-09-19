@@ -163,6 +163,24 @@ pub(crate) enum ApprovalCacheKey {
 }
 
 impl ApprovalAction {
+    fn requires_fresh_human_approval(&self) -> bool {
+        matches!(
+            self,
+            Self::ApplyPatch { changes, .. }
+                if changes.values().any(|change| {
+                    matches!(
+                        change,
+                        FileChange::Add { .. }
+                            | FileChange::Delete { .. }
+                            | FileChange::Update {
+                                move_path: Some(_),
+                                ..
+                            }
+                    )
+                })
+        )
+    }
+
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
             Self::ExecCommand {
@@ -483,6 +501,15 @@ impl Session {
         {
             return Err(ToolError::Rejected(reason.to_string()));
         }
+        if action.requires_fresh_human_approval() {
+            let resolution = ApprovalResolution {
+                decision: self.request_user_approval(&action, &ctx).await,
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
+
         let is_mcp_tool_call = matches!(&action, ApprovalAction::McpToolCall { .. });
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
         let permission_request_run_id = match &action {
@@ -790,6 +817,22 @@ impl Session {
                     .retry_reason
                     .clone()
                     .or_else(|| ctx.approval_reason.clone());
+                if action.requires_fresh_human_approval() {
+                    return self
+                        .request_patch_approval(
+                            ctx.review_context.turn(),
+                            ctx.call_id.clone(),
+                            changes.as_ref().clone(),
+                            reason.or_else(|| {
+                                Some(
+                                    "destructive apply_patch requires fresh human approval"
+                                        .to_string(),
+                                )
+                            }),
+                            /*grant_root*/ None,
+                        )
+                        .await;
+                }
                 if *permissions_preapproved && reason.is_none() {
                     return ReviewDecision::Approved;
                 }
@@ -878,3 +921,4 @@ fn record_resolution(ctx: &ApprovalContext, resolution: &ApprovalResolution) {
 #[cfg(all(test, unix))]
 #[path = "approvals_tests.rs"]
 mod tests;
+

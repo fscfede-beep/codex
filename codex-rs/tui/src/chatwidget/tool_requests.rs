@@ -312,6 +312,17 @@ impl ChatWidget {
         self.flush_answer_stream_with_separator();
 
         let changed_paths = ev.changes.keys().cloned().collect();
+        let fresh_only = ev.changes.values().any(|change| {
+            matches!(
+                change,
+                FileChange::Add { .. }
+                    | FileChange::Delete { .. }
+                    | FileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        });
         let request = ApprovalRequest::ApplyPatch(ApplyPatchApprovalRequest {
             thread_id: self.thread_id.unwrap_or_default(),
             thread_label: None,
@@ -319,6 +330,7 @@ impl ChatWidget {
             reason: ev.reason,
             changes: ev.changes,
             cwd: self.config.cwd.clone(),
+            fresh_only,
         });
         self.bottom_pane
             .push_approval_request(request, &self.config.features);

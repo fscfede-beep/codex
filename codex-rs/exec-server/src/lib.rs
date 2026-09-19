@@ -79,6 +79,7 @@ pub use codex_file_system::ExecutorFileSystemFuture;
 pub use codex_file_system::FILE_READ_CHUNK_SIZE;
 pub use codex_file_system::FileMetadata;
 pub use codex_file_system::FileSystemEnvironmentAccessor;
+pub use codex_file_system::FileSystemObjectIdentity;
 pub use codex_file_system::FileSystemReadStream;
 pub use codex_file_system::FileSystemResult;
 pub use codex_file_system::FileSystemSandboxContext;
@@ -222,3 +223,4 @@ pub use server::RequestDispatchMode;
 pub use server::run_main;
 pub use server::run_main_with_telemetry;
 pub use telemetry::ExecServerTelemetry;
+
