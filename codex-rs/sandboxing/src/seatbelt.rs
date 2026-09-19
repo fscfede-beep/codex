@@ -853,6 +853,7 @@ fn create_seatbelt_command_args_for_legacy_policy(
         environment_id: None,
         network,
         extra_allow_unix_sockets: &[],
+        allow_destructive_filesystem_effects: true,
     })
 }
 
@@ -867,6 +868,8 @@ pub struct CreateSeatbeltCommandArgsParams<'a> {
     pub environment_id: Option<&'a str>,
     pub network: Option<&'a NetworkProxy>,
     pub extra_allow_unix_sockets: &'a [AbsolutePathBuf],
+    /// Trusted filesystem-helper launches may retain delete; normal process sandboxes deny it.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 pub fn create_seatbelt_command_args(
@@ -895,6 +898,7 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         environment_id,
         network,
         extra_allow_unix_sockets,
+        allow_destructive_filesystem_effects,
     } = args;
 
     let unreadable_roots =
@@ -1033,6 +1037,14 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
             }
         };
 
+    let destructive_delete_deny_policy = if allow_destructive_filesystem_effects {
+        String::new()
+    } else {
+        // file-write-unlink covers unlink and rename. A deny over the whole sandbox
+        // keeps write capability separate from delete capability.
+        "(deny file-write-unlink (subpath "/"))".to_string()
+    };
+
     let proxy = proxy_policy_inputs(
         managed_network,
         network,
@@ -1049,6 +1061,7 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
         file_write_policy,
+        destructive_delete_deny_policy,
         network_policy,
     ];
     if file_system_sandbox_policy.has_full_disk_read_access() {
