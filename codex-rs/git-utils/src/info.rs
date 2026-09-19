@@ -456,34 +456,43 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
 /// 1) The symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
 /// 2) Local fallback to existing `main` or `master` if present
 async fn get_default_branch(cwd: &Path) -> Option<String> {
-    // Prefer the first remote (with origin prioritized)
+    // Background metadata stays strictly local: only already-present refs are inspected.
     let remotes = get_git_remotes(cwd).await.unwrap_or_default();
     for remote in remotes {
-        // Try symbolic-ref, which returns something like: refs/remotes/origin/main
-        if let Some(symref_output) = run_git_command_with_timeout(
-            &[
-                "symbolic-ref",
-                "--quiet",
-                &format!("refs/remotes/{remote}/HEAD"),
-            ],
-            cwd,
-        )
-        .await
-            && symref_output.status.success()
-            && let Ok(sym) = String::from_utf8(symref_output.stdout)
-        {
-            let trimmed = sym.trim();
-            if let Some((_, name)) = trimmed.rsplit_once('/') {
-                return Some(name.to_string());
-            }
+        let remote_head = format!("refs/remotes/{remote}/HEAD");
+        let Some(symref_output) =
+            run_git_command_with_timeout(&["symbolic-ref", "--quiet", &remote_head], cwd).await
+        else {
+            continue;
+        };
+        if !symref_output.status.success() {
+            continue;
         }
 
+        let Ok(symref) = String::from_utf8(symref_output.stdout) else {
+            continue;
+        };
+        let trimmed = symref.trim();
+        let remote_prefix = format!("refs/remotes/{remote}/");
+        let Some(branch) = trimmed.strip_prefix(&remote_prefix) else {
+            continue;
+        };
+        if branch.is_empty() {
+            continue;
+        }
+
+        let Some(verify) =
+            run_git_command_with_timeout(&["rev-parse", "--verify", "--quiet", trimmed], cwd).await
+        else {
+            continue;
+        };
+        if verify.status.success() {
+            return Some(branch.to_string());
+        }
     }
 
-    // No remote-derived default; try common local defaults if they exist
     get_default_branch_local(cwd).await
 }
-
 /// Determine the repository's default branch name, if available.
 ///
 /// This inspects remote configuration first (including the symbolic `HEAD`
