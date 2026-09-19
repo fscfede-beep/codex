@@ -48,7 +48,7 @@ fn test_standalone_exec_cli_can_use_apply_patch() -> anyhow::Result<()> {
 fn hidden_arg0_apply_patch_rejects_destructive_delete_before_filesystem_mutation() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let target = tmp.path().join("protected.txt");
-    fs::write(&target, "must survive\\n")?;
+    fs::write(&target, "must survive\n")?;
 
     let delete_patch = r#"*** Begin Patch
 *** Delete File: protected.txt
@@ -62,7 +62,7 @@ fn hidden_arg0_apply_patch_rejects_destructive_delete_before_filesystem_mutation
         .failure()
         .stderr(predicates::str::contains("destructive apply_patch"));
 
-    assert_eq!(fs::read_to_string(&target)?, "must survive\\n");
+    assert_eq!(fs::read_to_string(&target)?, "must survive\n");
     Ok(())
 }
 
