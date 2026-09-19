@@ -235,6 +235,22 @@ impl ApprovalAction {
         }
     }
 
+    pub(crate) fn apply_patch_requires_fresh_human_approval(
+        changes: &Arc<HashMap<PathBuf, FileChange>>,
+    ) -> bool {
+        changes.values().any(|change| {
+            matches!(
+                change,
+                FileChange::Add { .. }
+                    | FileChange::Delete { .. }
+                    | FileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    }
+
     pub(crate) fn cache_keys(&self) -> Vec<ApprovalCacheKey> {
         match self {
             Self::ExecCommand {
@@ -260,6 +276,9 @@ impl ApprovalAction {
             | Self::NetworkAccess { .. }
             | Self::RequestPermissions { .. }
             | Self::WriteStdin { .. } => Vec::new(),
+            Self::ApplyPatch { changes, .. } if Self::apply_patch_requires_fresh_human_approval(changes) => {
+                Vec::new()
+            },
             Self::ApplyPatch {
                 environment_id,
                 files,
@@ -489,6 +508,12 @@ impl Session {
         }
         let is_mcp_tool_call = matches!(&action, ApprovalAction::McpToolCall { .. });
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
+        let requires_fresh_human_approval = match &action {
+            ApprovalAction::ApplyPatch { changes, .. } => {
+                ApprovalAction::apply_patch_requires_fresh_human_approval(changes)
+            }
+            _ => false,
+        };
         let permission_request_run_id = match &action {
             #[cfg(unix)]
             ApprovalAction::Execve { approval_id, .. } => approval_id.clone(),
@@ -500,23 +525,32 @@ impl Session {
         // Approval precedence is:
         // 1. Hooks
         // 2. If StrictAutoReview || Guardian enabled, then Guardian. Else, user.
-        let resolution = match run_permission_request_hooks(
-            self,
-            &ctx.review_context,
-            &permission_request_run_id,
-            action.permission_request_payload(),
-        )
-        .await
-        {
-            Some(PermissionRequestDecision::Allow) => ApprovalResolution {
-                decision: ReviewDecision::Approved,
-                source: ApprovalResolutionSource::Hook,
-            },
-            Some(PermissionRequestDecision::Deny { message }) => ApprovalResolution {
-                decision: ReviewDecision::denied(message),
-                source: ApprovalResolutionSource::Hook,
-            },
-            None => self.request_reviewer_approval(action, &ctx).await,
+        // Destructive ApplyPatch is a human-only approval boundary:
+        // no hook, Guardian, session cache, or permissions_preapproved shortcut may authorize it.
+        let resolution = if requires_fresh_human_approval {
+            ApprovalResolution {
+                decision: self.request_user_approval(&action, &ctx).await,
+                source: ApprovalResolutionSource::User,
+            }
+        } else {
+            match run_permission_request_hooks(
+                self,
+                &ctx.review_context,
+                &permission_request_run_id,
+                action.permission_request_payload(),
+            )
+            .await
+            {
+                Some(PermissionRequestDecision::Allow) => ApprovalResolution {
+                    decision: ReviewDecision::Approved,
+                    source: ApprovalResolutionSource::Hook,
+                },
+                Some(PermissionRequestDecision::Deny { message }) => ApprovalResolution {
+                    decision: ReviewDecision::denied(message),
+                    source: ApprovalResolutionSource::Hook,
+                },
+                None => self.request_reviewer_approval(action, &ctx).await,
+            }
         };
         // Network approvals record their final telemetry after validation and persistence.
         if !is_network_approval {
@@ -794,6 +828,19 @@ impl Session {
                     .retry_reason
                     .clone()
                     .or_else(|| ctx.approval_reason.clone());
+                if ApprovalAction::apply_patch_requires_fresh_human_approval(changes) {
+                    return self
+                        .request_patch_approval(
+                            ctx.review_context.turn(),
+                            ctx.call_id.clone(),
+                            changes.as_ref().clone(),
+                            reason.or_else(|| Some(
+                                "destructive apply_patch requires fresh human approval".to_string(),
+                            )),
+                            /*grant_root*/ None,
+                        )
+                        .await;
+                }
                 if *permissions_preapproved && reason.is_none() {
                     return ReviewDecision::Approved;
                 }
