@@ -46,6 +46,13 @@ pub fn run_main() -> i32 {
         return 2;
     }
 
+    if crate::patch_is_destructive(&patch_arg) {
+        eprintln!(
+            "Error: destructive apply_patch requires the governed Codex approval and sandbox path."
+        );
+        return 1;
+    }
+
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
