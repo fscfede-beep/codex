@@ -112,6 +112,45 @@ async fn process_spawn_returns_before_exit_and_emits_exit_notification() -> Resu
 }
 
 #[tokio::test]
+async fn process_spawn_fails_closed_before_backend_creation() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let (_server, mut mcp) = initialized_mcp(codex_home.path()).await?;
+    let probe = codex_home.path().join("must-not-run");
+
+    let request_id = mcp
+        .send_process_spawn_request(process_spawn_params(
+            "blocked-process".to_string(),
+            codex_home.path(),
+            if cfg!(windows) {
+                vec![
+                    "powershell.exe".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    format!("[IO.File]::WriteAllText('{}', 'x')", probe.display()),
+                ]
+            } else {
+                vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    format!("printf x > '{}'", probe.display()),
+                ]
+            },
+        )?)
+        .await?;
+
+    let error = mcp
+        .read_stream_until_error_message(RequestId::Integer(request_id))
+        .await?;
+    assert_eq!(
+        error.error.message,
+        "process/spawn is disabled because this RPC has no governed approval and sandbox authority"
+    );
+    assert!(!probe.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn process_spawn_returns_error_when_local_environment_is_disabled() -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
