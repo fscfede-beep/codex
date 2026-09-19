@@ -387,6 +387,12 @@ pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
         permissions.clone()
     }
 
+    /// Grants the OS-level delete capability only to a request whose destructive effect
+    /// has already received fresh approval. The default is fail-closed.
+    fn allow_destructive_filesystem_effects(&self, _req: &Req, _already_approved: bool) -> bool {
+        false
+    }
+
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
         false
     }
@@ -426,6 +432,9 @@ pub(crate) struct SandboxAttempt<'a> {
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
     pub network_denial_cancellation_token: Option<CancellationToken>,
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
+    /// Ephemeral OS capability: may this attempt delete/rename filesystem objects?
+    /// Never serialized and never persisted.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 pub(crate) fn executor_windows_sandbox_level(
@@ -503,8 +512,11 @@ impl<'a> SandboxAttempt<'a> {
         environment_id: Option<&str>,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
         let network = self.network_proxy(network);
-        let request = self
+        let manager = self
             .manager
+            .clone()
+            .with_allow_destructive_filesystem_effects(self.allow_destructive_filesystem_effects);
+        let request = manager
             .transform(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
