@@ -482,7 +482,7 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
     get_default_branch_local(cwd).await
 }
 
-/// Determine the repository's default branch name, if available./// Determine the repository's default branch name, if available.
+/// Determine the repository's default branch name, if available.
 ///
 /// This inspects remote configuration first (including the symbolic `HEAD`
 /// reference) and falls back to common local defaults such as `main` or
