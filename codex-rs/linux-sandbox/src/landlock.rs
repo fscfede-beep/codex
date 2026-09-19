@@ -150,10 +150,8 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let abi = ABI::V5;
     // Workspace-write must not imply deletion. Landlock models unlink/rmdir and
     // rename/replace as dedicated rights, so leave those rights unhandled here.
-    let access_rw = AccessFs::from_all(abi)
-        & !AccessFs::RemoveDir
-        & !AccessFs::RemoveFile
-        & !AccessFs::Refer;
+    let access_rw =
+        AccessFs::from_all(abi) & !AccessFs::RemoveDir & !AccessFs::RemoveFile & !AccessFs::Refer;
     let access_ro = AccessFs::from_read(abi);
 
     let mut ruleset = Ruleset::default()
@@ -382,3 +380,4 @@ mod tests {
         );
     }
 }
+
