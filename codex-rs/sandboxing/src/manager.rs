@@ -266,6 +266,9 @@ impl std::error::Error for SandboxTransformError {
 
 #[derive(Clone, Default)]
 pub struct SandboxManager {
+    /// Filesystem helpers are trusted only after the parent already established
+    /// the enclosing sandbox. Normal process launches keep deletion denied.
+    allow_destructive_filesystem_effects: bool,
     #[cfg(target_os = "macos")]
     seatbelt_profile: MacosSeatbeltProfile,
     #[cfg(target_os = "macos")]
@@ -280,6 +283,7 @@ impl SandboxManager {
     /// Creates a manager that applies the narrower runtime profile required by filesystem helpers.
     pub fn for_file_system_helpers() -> Self {
         Self {
+            allow_destructive_filesystem_effects: true,
             #[cfg(target_os = "macos")]
             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
             #[cfg(target_os = "macos")]
@@ -443,6 +447,7 @@ impl SandboxManager {
                         environment_id,
                         network,
                         extra_allow_unix_sockets: &[],
+                        allow_destructive_filesystem_effects: self.allow_destructive_filesystem_effects,
                     },
                     self.seatbelt_profile,
                     self.allowed_symlinked_codex_home.as_ref(),
@@ -677,6 +682,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             deny_read_paths_override,
             deny_write_paths_override,
             codex_home,
+            self.allow_destructive_filesystem_effects,
         )
         .map_err(|err| SandboxTransformError::WindowsSandboxPreparation(err.to_string()))?;
 
