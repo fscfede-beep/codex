@@ -575,6 +575,74 @@ async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Res
 }
 
 #[tokio::test]
+async fn named_permission_profile_rejects_legacy_sandbox_override() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![]).await;
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"default_permissions = "colleague"
+
+[permissions.colleague]
+extends = ":read-only"
+"#,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let started = start_thread(&mut mcp).await?;
+    assert_eq!(
+        started
+            .active_permission_profile
+            .as_ref()
+            .map(|profile| profile.id.as_str()),
+        Some("colleague")
+    );
+
+    let settings_request_id = mcp
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: started.thread.id.clone(),
+            sandbox_policy: Some(SandboxPolicy::DangerFullAccess),
+            ..Default::default()
+        })
+        .await?;
+    let settings_error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(settings_request_id)),
+    )
+    .await??;
+    assert_eq!(
+        settings_error.error.message,
+        "thread/settings/update cannot override a named permission profile with `sandboxPolicy`; select the target permission profile explicitly"
+    );
+
+    let turn_request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: started.thread.id,
+            sandbox_policy: Some(SandboxPolicy::DangerFullAccess),
+            input: vec![V2UserInput::Text {
+                text: "must not elevate".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(turn_request_id)),
+    )
+    .await??;
+    assert_eq!(
+        turn_error.error.message,
+        "turn/start cannot override a named permission profile with `sandboxPolicy`; select the target permission profile explicitly"
+    );
+
+    assert!(received_response_bodies(&server).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
         create_final_assistant_message_sse_response("done")?,
