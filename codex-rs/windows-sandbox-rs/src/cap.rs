@@ -85,6 +85,7 @@ pub fn load_or_create_cap_sids(codex_home: &Path) -> Result<CapSids> {
         readonly: make_random_cap_sid_string(),
         workspace_by_cwd: HashMap::new(),
         writable_root_by_path: HashMap::new(),
+        destructive_root_by_path: HashMap::new(),
     };
     persist_caps(&path, &caps)?;
     Ok(caps)
