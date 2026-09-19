@@ -204,7 +204,6 @@ pub struct ApplyPatchAction {
     pub cwd: PathUri,
 }
 
-impl ApplyPatchAction {
 /// Returns true when raw patch text contains a destructive filesystem mutation.
 /// Invalid patches return false because they are rejected by the normal parser.
 pub fn patch_is_destructive(patch: &str) -> bool {
@@ -224,6 +223,7 @@ pub fn patch_is_destructive(patch: &str) -> bool {
     })
 }
 
+impl ApplyPatchAction {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
