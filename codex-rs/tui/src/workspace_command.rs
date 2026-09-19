@@ -247,6 +247,8 @@ mod tests {
             vec![
                 "git".to_string(),
                 "-c".to_string(),
+                codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                "-c".to_string(),
                 "core.sshCommand=".to_string(),
                 "remote".to_string(),
                 "show".to_string(),
