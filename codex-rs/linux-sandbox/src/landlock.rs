@@ -141,6 +141,22 @@ fn set_no_new_privs() -> Result<()> {
     Ok(())
 }
 
+/// Installs a deny-only Landlock layer for unlink, directory removal, and cross-directory rename.
+/// No rule grants these handled rights, so they are denied throughout the sandboxed process.
+fn install_destructive_filesystem_deny() -> Result<()> {
+    let abi = ABI::V5;
+    let destructive_access = AccessFs::RemoveDir | AccessFs::RemoveFile | AccessFs::Refer;
+    let status = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(destructive_access)?
+        .create()?
+        .restrict_self()?;
+    if status.ruleset == landlock::RulesetStatus::NotEnforced {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+    }
+    Ok(())
+}
+
 /// Installs Landlock file-system rules on the current thread allowing read
 /// access to the entire file-system while restricting write access to
 /// `/dev/null` and the provided list of `writable_roots`.
