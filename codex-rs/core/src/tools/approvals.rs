@@ -276,9 +276,6 @@ impl ApprovalAction {
             | Self::NetworkAccess { .. }
             | Self::RequestPermissions { .. }
             | Self::WriteStdin { .. } => Vec::new(),
-            Self::ApplyPatch { changes, .. } if Self::apply_patch_requires_fresh_human_approval(changes) => {
-                Vec::new()
-            },
             Self::ApplyPatch {
                 environment_id,
                 files,
@@ -525,40 +522,23 @@ impl Session {
         // Approval precedence is:
         // 1. Hooks
         // 2. If StrictAutoReview || Guardian enabled, then Guardian. Else, user.
-        // Destructive ApplyPatch is a human-only approval boundary:
-        // no hook, Guardian, session cache, or permissions_preapproved shortcut may authorize it.
-        let resolution = if requires_fresh_human_approval {
-            let decision = self.request_user_approval(&action, &ctx).await;
-            // Destructive ApplyPatch is one-shot: accepting the UI's session-scoped
-            // variant is normalized to a single-call approval at the server boundary.
-            let decision = if decision == ReviewDecision::ApprovedForSession {
-                ReviewDecision::Approved
-            } else {
-                decision
-            };
-            ApprovalResolution {
-                decision,
-                source: ApprovalResolutionSource::User,
-            }
-        } else {
-            match run_permission_request_hooks(
-                self,
-                &ctx.review_context,
-                &permission_request_run_id,
-                action.permission_request_payload(),
-            )
-            .await
-            {
-                Some(PermissionRequestDecision::Allow) => ApprovalResolution {
-                    decision: ReviewDecision::Approved,
-                    source: ApprovalResolutionSource::Hook,
-                },
-                Some(PermissionRequestDecision::Deny { message }) => ApprovalResolution {
-                    decision: ReviewDecision::denied(message),
-                    source: ApprovalResolutionSource::Hook,
-                },
-                None => self.request_reviewer_approval(action, &ctx).await,
-            }
+        let resolution = match run_permission_request_hooks(
+            self,
+            &ctx.review_context,
+            &permission_request_run_id,
+            action.permission_request_payload(),
+        )
+        .await
+        {
+            Some(PermissionRequestDecision::Allow) => ApprovalResolution {
+                decision: ReviewDecision::Approved,
+                source: ApprovalResolutionSource::Hook,
+            },
+            Some(PermissionRequestDecision::Deny { message }) => ApprovalResolution {
+                decision: ReviewDecision::denied(message),
+                source: ApprovalResolutionSource::Hook,
+            },
+            None => self.request_reviewer_approval(action, &ctx).await,
         };
         // Network approvals record their final telemetry after validation and persistence.
         if !is_network_approval {
