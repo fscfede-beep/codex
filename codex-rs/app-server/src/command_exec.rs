@@ -233,10 +233,16 @@ impl CommandExecManager {
             cwd,
             env,
             expiration,
-            sandbox: _sandbox,
+            sandbox,
             arg0,
             ..
         } = exec_request;
+        if sandbox != SandboxType::None {
+            return Err(invalid_request(
+                "command/exec sandboxed requests require a governed sandbox spawn path",
+            ));
+        }
+
         // TODO(anp): Keep PathUri through the local command launch boundary.
         let cwd = cwd
             .to_abs_path()
