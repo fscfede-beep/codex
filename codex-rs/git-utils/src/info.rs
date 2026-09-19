@@ -388,7 +388,10 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         // worktree or index, so do not reduce the requested command's timeout.
         let mut command = Command::new(self.git);
         command
+            .env("GIT_ALLOW_PROTOCOL", "")
+            .env("GIT_NO_LAZY_FETCH", "1")
             .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+            .args(["-c", "core.sshCommand="])
             .args(args)
             .current_dir(self.cwd);
         match run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await {
@@ -414,8 +417,11 @@ pub(crate) async fn run_git_command_with_timeout_from(
 ) -> Option<std::process::Output> {
     let mut command = Command::new(git);
     command
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        .args(["-c", "core.sshCommand="])
         // Keep internal Git commands independent of repository-selected hooks
         // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
@@ -466,27 +472,15 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
             && let Ok(sym) = String::from_utf8(symref_output.stdout)
         {
             let trimmed = sym.trim();
-            if let Some((_, name)) = trimmed.rsplit_once('/') {
+            let remote_ref_prefix = format!("refs/remotes/{remote}/");
+            if let Some(name) = trimmed.strip_prefix(&remote_ref_prefix)
+                && !name.is_empty()
+                && git_ref_exists(cwd, trimmed).await
+            {
                 return Some(name.to_string());
             }
         }
 
-        // Fall back to parsing `git remote show <remote>` output
-        if let Some(show_output) =
-            run_git_command_with_timeout(&["remote", "show", &remote], cwd).await
-            && show_output.status.success()
-            && let Ok(text) = String::from_utf8(show_output.stdout)
-        {
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("HEAD branch:") {
-                    let name = rest.trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
-                }
-            }
-        }
     }
 
     // No remote-derived default; try common local defaults if they exist
@@ -501,6 +495,15 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
 /// example when the current directory is not inside a Git repository.
 pub async fn default_branch_name(cwd: &Path) -> Option<String> {
     get_default_branch(cwd).await
+}
+
+async fn git_ref_exists(cwd: &Path, reference: &str) -> bool {
+    run_git_command_with_timeout(
+        &["rev-parse", "--verify", "--quiet", reference],
+        cwd,
+    )
+    .await
+    .is_some_and(|output| output.status.success())
 }
 
 /// Attempt to determine the repository's default branch name from local branches.
