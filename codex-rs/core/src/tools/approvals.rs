@@ -528,8 +528,16 @@ impl Session {
         // Destructive ApplyPatch is a human-only approval boundary:
         // no hook, Guardian, session cache, or permissions_preapproved shortcut may authorize it.
         let resolution = if requires_fresh_human_approval {
+            let decision = self.request_user_approval(&action, &ctx).await;
+            // Destructive ApplyPatch is one-shot: accepting the UI's session-scoped
+            // variant is normalized to a single-call approval at the server boundary.
+            let decision = if decision == ReviewDecision::ApprovedForSession {
+                ReviewDecision::Approved
+            } else {
+                decision
+            };
             ApprovalResolution {
-                decision: self.request_user_approval(&action, &ctx).await,
+                decision,
                 source: ApprovalResolutionSource::User,
             }
         } else {
