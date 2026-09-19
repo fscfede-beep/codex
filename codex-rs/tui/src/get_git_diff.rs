@@ -745,6 +745,8 @@ mod tests {
         [
             "git",
             "-c",
+            "core.sshCommand=",
+            "-c",
             fsmonitor.git_config_arg(),
             "-c",
             DISABLE_HOOKS_CONFIG,
@@ -756,7 +758,7 @@ mod tests {
     }
 
     fn git_probe_command(args: &[&str]) -> Vec<String> {
-        ["git"]
+        ["git", "-c", "core.sshCommand="]
             .into_iter()
             .chain(args.iter().copied())
             .map(str::to_string)
