@@ -46,19 +46,7 @@ pub fn run_main() -> i32 {
         return 2;
     }
 
-    if let Ok(parsed) = crate::parse_patch(&patch_arg)
-        && parsed.hunks.iter().any(|hunk| {
-            matches!(
-                hunk,
-                crate::Hunk::AddFile { .. }
-                    | crate::Hunk::DeleteFile { .. }
-                    | crate::Hunk::UpdateFile {
-                        move_path: Some(_),
-                        ..
-                    }
-            )
-        })
-    {
+    if crate::patch_is_destructive(&patch_arg) {
         eprintln!(
             "Error: destructive apply_patch requires the governed Codex approval and sandbox path."
         );
