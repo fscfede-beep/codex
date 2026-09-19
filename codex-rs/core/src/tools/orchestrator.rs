@@ -292,6 +292,18 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+
+        // Require is a hard invariant: a missing backend must stop execution rather than
+        // degrading into an unsandboxed process.
+        if sandbox_preference == SandboxablePreference::Require
+            && sandbox_requested
+            && !executor_managed_process_sandbox
+            && initial_sandbox == SandboxType::None
+        {
+            return Err(ToolError::Rejected(
+                "required sandbox backend is unavailable; refusing fail-open execution".to_string(),
+            ));
+        }
         if sandbox_requested
             && !executor_managed_process_sandbox
             && sandbox_preference == SandboxablePreference::Require
