@@ -679,6 +679,88 @@ async fn evaluates_bash_lc_inner_commands() {
     .await;
 }
 
+#[tokio::test]
+async fn complex_shell_script_honors_restrictive_inner_rule() {
+    let command = vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        r#"set -e; target=/tmp/work; if test -e "$target"; then /bin/rm -- "$target"; fi"#.to_string(),
+    ];
+
+    let requirement = exec_approval_requirement_for_command(ExecApprovalRequirementScenario {
+        policy_src: Some(
+            r#"prefix_rule(pattern=["rm"], decision="forbidden")"#.to_string(),
+        ),
+        command,
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: PermissionProfile::Disabled,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        prefix_rule: None,
+    })
+    .await;
+
+    match requirement {
+        ExecApprovalRequirement::Forbidden { reason } => {
+            assert!(reason.contains("policy forbids commands starting with `rm`"));
+        }
+        other => panic!("expected restrictive rule to block complex script, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn nested_shell_honors_restrictive_inner_rule() {
+    let command = vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        "bash -lc 'rm -- /tmp/a /tmp/b && ls -la /tmp'".to_string(),
+    ];
+
+    let requirement = exec_approval_requirement_for_command(ExecApprovalRequirementScenario {
+        policy_src: Some(
+            r#"prefix_rule(pattern=["rm"], decision="forbidden")"#.to_string(),
+        ),
+        command,
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: PermissionProfile::Disabled,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        prefix_rule: None,
+    })
+    .await;
+
+    match requirement {
+        ExecApprovalRequirement::Forbidden { reason } => {
+            assert!(reason.contains("policy forbids commands starting with `rm`"));
+        }
+        other => panic!("expected nested restrictive rule to block script, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn complex_shell_does_not_gain_allow_from_literal_extraction() {
+    let command = vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        "rm -- /tmp/a; definitely_unknown_command".to_string(),
+    ];
+
+    let requirement = exec_approval_requirement_for_command(ExecApprovalRequirementScenario {
+        policy_src: Some(
+            r#"prefix_rule(pattern=["rm"], decision="allow")"#.to_string(),
+        ),
+        command: command.clone(),
+        approval_policy: AskForApproval::OnRequest,
+        permission_profile: PermissionProfile::read_only(),
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        prefix_rule: None,
+    })
+    .await;
+
+    assert!(matches!(
+        requirement,
+        ExecApprovalRequirement::NeedsApproval { .. }
+    ));
+}
+
 #[test]
 fn commands_for_exec_policy_falls_back_for_empty_shell_script() {
     let command = vec!["bash".to_string(), "-lc".to_string(), "".to_string()];
