@@ -415,6 +415,8 @@ pub(crate) async fn run_git_command_with_timeout_from(
     let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
         // Keep internal Git commands independent of repository-selected hooks,
         // fsmonitor helpers, and SSH commands while preserving built-in fsmonitor acceleration.
