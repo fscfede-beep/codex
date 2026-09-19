@@ -44,6 +44,8 @@ pub struct WindowsSandboxSessionRequest<'a> {
     pub deny_write_paths_override: &'a [AbsolutePathBuf],
     pub tty: bool,
     pub stdin_open: bool,
+    /// Ephemeral approval-bound delete capability.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 pub async fn spawn_windows_sandbox_session_for_level(
@@ -75,6 +77,7 @@ pub(crate) async fn spawn_windows_sandbox_session_with_desktop(
             request.deny_write_paths_override,
             request.tty,
             request.stdin_open,
+            request.allow_destructive_filesystem_effects,
             private_desktop_name,
         )
         .await
