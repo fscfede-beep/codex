@@ -481,6 +481,7 @@ mod tests {
     use super::*;
     use crate::workspace_command::WorkspaceCommand;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -560,6 +561,7 @@ mod tests {
             .expect("git command");
 
         assert!(output.success());
+        assert!(runner.saw_local_only_git(&["git", "rev-parse", "--git-dir"]));
     }
 
     #[tokio::test]
@@ -695,7 +697,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<(Vec<String>, HashMap<String, Option<String>>)>>,
     }
 
     impl FakeRunner {
@@ -707,6 +709,34 @@ mod tests {
         }
 
         fn saw(&self, argv: &[&str]) -> bool {
+            self.normalized_argv(argv)
+                .map(|expected| {
+                    self.seen
+                        .lock()
+                        .expect("seen lock")
+                        .iter()
+                        .any(|(seen, _)| seen == &expected)
+                })
+                .unwrap_or(false)
+        }
+
+        fn saw_local_only_git(&self, argv: &[&str]) -> bool {
+            let Some(expected) = self.normalized_argv(argv) else {
+                return false;
+            };
+            self.seen
+                .lock()
+                .expect("seen lock")
+                .iter()
+                .any(|(seen, env)| {
+                    seen == &expected
+                        && env.get("GIT_ALLOW_PROTOCOL") == Some(&Some(String::new()))
+                        && env.get("GIT_NO_LAZY_FETCH") == Some(&Some("1".to_string()))
+                        && env.get("GIT_OPTIONAL_LOCKS") == Some(&Some("0".to_string()))
+                })
+        }
+
+        fn normalized_argv(&self, argv: &[&str]) -> Option<Vec<String>> {
             let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
             if argv.first().map(String::as_str) == Some("git") {
                 argv.splice(
@@ -719,11 +749,7 @@ mod tests {
                     ],
                 );
             }
-            self.seen
-                .lock()
-                .expect("seen lock")
-                .iter()
-                .any(|seen| seen == &argv)
+            Some(argv)
         }
     }
 
@@ -741,7 +767,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("seen lock")
-                .push(command.argv.clone());
+                .push((command.argv.clone(), command.env.clone()));
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses
