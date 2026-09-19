@@ -236,8 +236,7 @@ async fn try_verify_apply_patch_args(
     // Destructive patches must be scope-checked before any target content is read.
     // This prevents Full Access/Disabled filesystem contexts from becoming a pre-approval
     // oracle for out-of-workspace DeleteFile/Move/AddFile targets.
-    let destructive_sandbox =
-        crate::destructive_patch_sandbox(&hunks, &effective_cwd, sandbox)?;
+    let destructive_sandbox = crate::destructive_patch_sandbox(&hunks, &effective_cwd, sandbox)?;
     let sandbox = destructive_sandbox.as_ref().or(sandbox);
 
     let mut changes = HashMap::new();
@@ -514,7 +513,10 @@ async fn capture_destructive_target(
             ))
         }
         Err(source) => Err(ApplyPatchError::IoError(IoError {
-            context: format!("Failed to inspect destructive target {}", path.inferred_native_path_string()),
+            context: format!(
+                "Failed to inspect destructive target {}",
+                path.inferred_native_path_string()
+            ),
             source,
         })),
     }
