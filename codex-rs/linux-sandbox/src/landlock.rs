@@ -46,6 +46,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
     proxy_routing_active: bool,
+    deny_destructive_filesystem: bool,
 ) -> Result<()> {
     let (file_system_sandbox_policy, network_sandbox_policy) =
         permission_profile.to_runtime_permissions();
@@ -75,6 +76,10 @@ pub(crate) fn apply_permission_profile_to_current_thread(
 
     if let Some(mode) = network_seccomp_mode {
         install_network_seccomp_filter_on_current_thread(mode, managed_network)?;
+    }
+
+    if deny_destructive_filesystem {
+        install_delete_deny_landlock_on_current_thread()?;
     }
 
     if apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access() {
@@ -131,6 +136,23 @@ fn set_no_new_privs() -> Result<()> {
     let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if result != 0 {
         return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// Denies unlink, recursive directory removal, and rename effects in the
+/// sandboxed process while leaving ordinary file creation and modification intact.
+fn install_delete_deny_landlock_on_current_thread() -> Result<()> {
+    let abi = ABI::V5;
+    let handled_access = AccessFs::RemoveDir | AccessFs::RemoveFile | AccessFs::Refer;
+    let ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(handled_access)?
+        .create()?
+        .set_no_new_privs(true);
+    let status = ruleset.restrict_self()?;
+    if status.ruleset == landlock::RulesetStatus::NotEnforced {
+        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
     }
     Ok(())
 }

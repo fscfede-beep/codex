@@ -1034,6 +1034,23 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     let include_platform_defaults = file_system_sandbox_policy.include_platform_defaults();
     let deny_read_policy =
         build_seatbelt_unreadable_glob_policy(file_system_sandbox_policy, sandbox_policy_cwd);
+    let destructive_delete_deny_policy = if profile == MacosSeatbeltProfile::Process {
+        if file_system_sandbox_policy.has_full_disk_write_access() {
+            "(deny file-write-unlink)".to_string()
+        } else {
+            file_system_sandbox_policy
+                .get_writable_roots_with_cwd_preserving_mutable_paths(sandbox_policy_cwd)
+                .into_iter()
+                .map(|root| {
+                    let path = root.root.to_string_lossy().replace('"', "\"");
+                    format!("(deny file-write-unlink (subpath \"{path}\"))")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    } else {
+        String::new()
+    };
     let mut policy_sections = vec![
         MACOS_SEATBELT_BASE_POLICY.to_string(),
         file_read_policy,
@@ -1062,6 +1079,12 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         }
     }
     policy_sections.push(deny_read_policy);
+    // Process sandboxes retain ordinary file creation/modification but cannot
+    // unlink or rename objects inside writable roots. The helper profile is
+    // intentionally excluded because it is an internal filesystem service.
+    if !destructive_delete_deny_policy.is_empty() {
+        policy_sections.push(destructive_delete_deny_policy);
+    }
     // Renaming an allowed ancestor relocates its protected descendants past
     // their pathname carveouts. Keep these denies last so no broader allowance
     // can reopen the unlink operation used by rename.

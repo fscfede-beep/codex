@@ -234,6 +234,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             proxy_routing_active,
+            /*deny_destructive_filesystem*/ true,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -280,6 +281,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             /*proxy_routing_active*/ false,
+            /*deny_destructive_filesystem*/ true,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -347,6 +349,7 @@ pub fn run_main() -> ! {
         /*apply_landlock_fs*/ true,
         managed_network.as_ref(),
         /*proxy_routing_active*/ false,
+        /*deny_destructive_filesystem*/ true,
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
     }
