@@ -126,10 +126,10 @@ impl ApplyPatchRuntime {
 
 impl Sandboxable for ApplyPatchRuntime {
     fn sandbox_preference(&self) -> SandboxablePreference {
-        SandboxablePreference::Auto
+        SandboxablePreference::Require
     }
     fn escalate_on_failure(&self) -> bool {
-        true
+        false
     }
 }
 
