@@ -383,7 +383,7 @@ impl ExecPolicyManager {
         // from partial static parsing. We only use literal command extraction as
         // a one-way safety check: restrictive managed rules discovered inside an
         // otherwise opaque script can still force Prompt/Forbidden.
-        if commands.len() == 1 && commands[0] == command {
+        if commands.len() == 1 && commands[0].as_slice() == command {
             let extra_matches =
                 restrictive_literal_policy_matches(exec_policy.as_ref(), command, &match_options);
             if !extra_matches.is_empty() {
