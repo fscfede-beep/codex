@@ -26,6 +26,13 @@ pub(crate) enum PatchSandboxRoute {
     Platform(WindowsSandboxLevel),
 }
 
+fn is_destructive_apply_patch(action: &ApplyPatchAction) -> bool {
+    action.changes().values().any(|change| match change {
+        ApplyPatchFileChange::Add { .. } | ApplyPatchFileChange::Delete { .. } => true,
+        ApplyPatchFileChange::Update { move_path, .. } => move_path.is_some(),
+    })
+}
+
 pub fn assess_patch_safety(
     action: &ApplyPatchAction,
     policy: AskForApproval,
@@ -38,6 +45,21 @@ pub fn assess_patch_safety(
         return SafetyCheck::Reject {
             reason: "empty patch".to_string(),
         };
+    }
+
+    if is_destructive_apply_patch(action) {
+        let forbidden = matches!(policy, AskForApproval::Never)
+            || matches!(
+                policy,
+                AskForApproval::Granular(granular_config)
+                    if !granular_config.allows_sandbox_approval()
+            );
+        if forbidden {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires fresh human approval".to_string(),
+            };
+        }
+        return SafetyCheck::AskUser;
     }
 
     match policy {

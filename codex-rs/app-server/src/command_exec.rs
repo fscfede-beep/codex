@@ -233,10 +233,22 @@ impl CommandExecManager {
             cwd,
             env,
             expiration,
-            sandbox: _sandbox,
+            sandbox,
             arg0,
             ..
         } = exec_request;
+
+        // The direct PTY backend has no governed approval or filesystem capability
+        // channel. A full-access profile must not be treated as authorization to
+        // execute through an unmediated process-spawn boundary.
+        if sandbox == SandboxType::None {
+            return Err(invalid_request(
+                "command/exec direct PTY execution is disabled without a governed sandbox capability",
+            ));
+        }
+        return Err(invalid_request(
+            "command/exec direct PTY backend does not support governed sandbox execution",
+        ));
         // TODO(anp): Keep PathUri through the local command launch boundary.
         let cwd = cwd
             .to_abs_path()
@@ -754,6 +766,55 @@ mod tests {
         assert_eq!(
             err.message,
             "streaming command/exec is not supported with windows sandbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_pty_full_access_execution_fails_closed() {
+        let (tx, _rx) = mpsc::channel(1);
+        let manager = CommandExecManager::default();
+        let request_id = ConnectionRequestId {
+            connection_id: ConnectionId(14),
+            request_id: codex_app_server_protocol::RequestId::Integer(4),
+        };
+        let cwd = AbsolutePathBuf::current_dir().expect("current dir");
+
+        let err = manager
+            .start(StartCommandExecParams {
+                outgoing: Arc::new(OutgoingMessageSender::new(
+                    tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
+                request_id,
+                process_id: Some("proc-14".to_string()),
+                exec_request: ExecRequest::new(
+                    vec!["not-a-real-program".to_string()],
+                    cwd.clone(),
+                    HashMap::new(),
+                    /*network*/ None,
+                    /*network_environment_id*/ None,
+                    ExecExpiration::DefaultTimeout,
+                    codex_core::exec::ExecCapturePolicy::ShellTool,
+                    SandboxType::None,
+                    vec![cwd],
+                    WindowsSandboxLevel::Disabled,
+                    PermissionProfile::Disabled,
+                    /*arg0*/ None,
+                ),
+                started_network_proxy: None,
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(DEFAULT_OUTPUT_BYTES_CAP),
+                size: None,
+            })
+            .await
+            .expect_err("unmediated full-access direct PTY execution must fail closed");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert_eq!(
+            err.message,
+            "command/exec direct PTY execution is disabled without a governed sandbox capability"
         );
     }
 

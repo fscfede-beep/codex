@@ -30,6 +30,10 @@ pub struct CapSids {
     /// later workspace sandboxes.
     #[serde(default)]
     pub writable_root_by_path: HashMap<String, String>,
+    /// Per-root destructive capability SIDs. These are separate from ordinary
+    /// workspace-write SIDs and are only used for explicitly approved launches.
+    #[serde(default)]
+    pub destructive_root_by_path: HashMap<String, String>,
 }
 
 pub fn cap_sid_file(codex_home: &Path) -> PathBuf {
@@ -70,6 +74,7 @@ pub fn load_or_create_cap_sids(codex_home: &Path) -> Result<CapSids> {
                 readonly: make_random_cap_sid_string(),
                 workspace_by_cwd: HashMap::new(),
                 writable_root_by_path: HashMap::new(),
+                destructive_root_by_path: HashMap::new(),
             };
             persist_caps(&path, &caps)?;
             return Ok(caps);
@@ -80,6 +85,7 @@ pub fn load_or_create_cap_sids(codex_home: &Path) -> Result<CapSids> {
         readonly: make_random_cap_sid_string(),
         workspace_by_cwd: HashMap::new(),
         writable_root_by_path: HashMap::new(),
+        destructive_root_by_path: HashMap::new(),
     };
     persist_caps(&path, &caps)?;
     Ok(caps)
@@ -109,6 +115,19 @@ pub fn writable_root_cap_sid_for_path(codex_home: &Path, root: &Path) -> Result<
     }
     let sid = make_random_cap_sid_string();
     caps.writable_root_by_path.insert(key, sid.clone());
+    persist_caps(&path, &caps)?;
+    Ok(sid)
+}
+
+pub fn destructive_cap_sid_for_root(codex_home: &Path, root: &Path) -> Result<String> {
+    let path = cap_sid_file(codex_home);
+    let mut caps = load_or_create_cap_sids(codex_home)?;
+    let key = canonical_path_key(root);
+    if let Some(sid) = caps.destructive_root_by_path.get(&key) {
+        return Ok(sid.clone());
+    }
+    let sid = make_random_cap_sid_string();
+    caps.destructive_root_by_path.insert(key, sid.clone());
     persist_caps(&path, &caps)?;
     Ok(sid)
 }

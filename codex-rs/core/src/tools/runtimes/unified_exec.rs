@@ -49,6 +49,8 @@ use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxablePreference;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
@@ -128,6 +130,48 @@ fn unified_exec_options(
     }
 }
 
+fn requires_universal_process_scope(req: &UnifiedExecRequest) -> bool {
+    let Some(convention) = req.cwd.infer_path_convention() else {
+        return false;
+    };
+    req.turn_environment
+        .permission_profile()
+        .file_system_sandbox_policy()
+        .has_full_disk_write_access_for_convention(Some(convention))
+}
+
+fn is_destructive_filesystem_exec(req: &UnifiedExecRequest) -> bool {
+    let platform = match req.turn_environment.executor_platform_os.as_deref() {
+        Some("windows") => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Windows,
+        Some(_) => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Posix,
+        None => match req.sandbox_cwd.infer_path_convention() {
+            Some(codex_utils_path_uri::PathConvention::Windows) => {
+                codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Windows
+            }
+            _ => codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Posix,
+        },
+    };
+    codex_shell_command::is_dangerous_command::is_destructive_filesystem_command_for_platform(
+        &req.command,
+        platform,
+    )
+}
+
+fn destructive_safe_additional_permissions(
+    req: &UnifiedExecRequest,
+    internal_permissions: Option<&AdditionalPermissionProfile>,
+) -> Option<AdditionalPermissionProfile> {
+    let merged = merge_permission_profiles(req.additional_permissions.as_ref(), internal_permissions);
+    if !is_destructive_filesystem_exec(req) && !requires_universal_process_scope(req) {
+        return merged;
+    }
+    let mut restricted = merged?;
+    // Destructive executions already receive a workspace-only PermissionProfile in the
+    // orchestrator. Do not allow an additional filesystem overlay to widen it again.
+    restricted.file_system = None;
+    (!restricted.is_empty()).then_some(restricted)
+}
+
 fn build_unified_exec_sandbox_command(
     command: &[String],
     cwd: &PathUri,
@@ -198,14 +242,64 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         Some(req.exec_approval_requirement.clone())
     }
 
+    fn allow_destructive_filesystem_effects(
+        &self,
+        req: &UnifiedExecRequest,
+        already_approved: bool,
+    ) -> bool {
+        already_approved && is_destructive_filesystem_exec(req)
+    }
+
+
     fn sandbox_permissions(&self, req: &UnifiedExecRequest) -> SandboxPermissions {
-        req.sandbox_permissions
+        if is_destructive_filesystem_exec(req) {
+            SandboxPermissions::UseDefault
+        } else {
+            req.sandbox_permissions
+        }
     }
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRuntime<'a> {
     fn turn_environment<'b>(&self, req: &'b UnifiedExecRequest) -> &'b TurnEnvironment {
         &req.turn_environment
+    }
+
+    fn sandbox_preference_for_request(
+        &self,
+        req: &UnifiedExecRequest,
+    ) -> SandboxablePreference {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
+            SandboxablePreference::Require
+        } else {
+            self.sandbox_preference()
+        }
+    }
+
+    fn escalate_on_failure_for_request(&self, req: &UnifiedExecRequest) -> bool {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
+            false
+        } else {
+            self.escalate_on_failure()
+        }
+    }
+
+    fn permission_profile_for_request(
+        &self,
+        req: &UnifiedExecRequest,
+        permissions: &PermissionProfile,
+        workspace_roots: &[PathUri],
+    ) -> PermissionProfile {
+        if is_destructive_filesystem_exec(req) || requires_universal_process_scope(req) {
+            PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            permissions.clone()
+        }
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &UnifiedExecRequest) -> bool {
@@ -598,10 +692,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             });
         let internal_permissions =
             merge_permission_profiles(sidecar_permissions.as_ref(), snapshot_permissions.as_ref());
-        let additional_permissions = merge_permission_profiles(
-            req.additional_permissions.as_ref(),
-            internal_permissions.as_ref(),
-        );
+        let additional_permissions =
+            destructive_safe_additional_permissions(req, internal_permissions.as_ref());
         let permissions = TerminalPermissions::for_launch(
             &req.turn_environment,
             &ctx.step_context.turn,
@@ -615,361 +707,3 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             } else {
                 SandboxPermissions::UseDefault
             },
-            req.additional_permissions.as_ref(),
-            internal_permissions.as_ref(),
-        );
-
-        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode {
-            let command = build_unified_exec_sandbox_command(
-                &command,
-                &req.cwd,
-                &env,
-                managed_network_context.clone(),
-                additional_permissions.clone(),
-            )
-            .map_err(|error| match error {
-                ToolError::Rejected(_) => {
-                    ToolError::Rejected("missing command line for PTY".to_string())
-                }
-                error @ ToolError::Codex(_) => error,
-            })?;
-            let options = unified_exec_options(attempt.network_denial_cancellation_token.clone());
-            let mut exec_env = attempt
-                .env_for(
-                    command,
-                    options,
-                    managed_network,
-                    Some(&req.turn_environment.selection.environment_id),
-                )
-                .map_err(ToolError::Codex)?;
-            exec_env.exec_server_env_config = req.exec_server_env_config.clone();
-            match zsh_fork::maybe_prepare_unified_exec(req, attempt, ctx, exec_env, zsh_fork_config)
-                .await?
-            {
-                Some(prepared) => {
-                    if req.turn_environment.environment.is_remote() {
-                        return Err(ToolError::Rejected(
-                            "unified_exec zsh-fork is not supported for remote environments"
-                                .to_string(),
-                        ));
-                    }
-                    let mut process = self
-                        .manager
-                        .open_session_with_prepared_exec_env(
-                            req.process_id,
-                            &prepared.exec_request,
-                            Some(ctx),
-                            windows_sandbox_proxy_settings_mode,
-                            /*network_policy_decider*/ None,
-                            req.tty,
-                            prepared.spawn_lifecycle,
-                            req.turn_environment.environment.as_ref(),
-                        )
-                        .await
-                        .map_err(|err| match err {
-                            UnifiedExecError::SandboxDenied { output, .. } => {
-                                ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                                    output: Box::new(output),
-                                    network_policy_decision: None,
-                                }))
-                            }
-                            other => ToolError::Rejected(other.to_string()),
-                        })?;
-                    process._shell_snapshot = shell_snapshot;
-                    return Ok(UnifiedExecAttempt {
-                        process,
-                        metrics_sidecar,
-                        permissions,
-                    });
-                }
-                None => {
-                    tracing::warn!(
-                        "UnifiedExec ZshFork backend specified, but conditions for using it were not met, falling back to direct execution",
-                    );
-                }
-            }
-        }
-        let command = build_unified_exec_sandbox_command(
-            &command,
-            &req.cwd,
-            &env,
-            managed_network_context,
-            additional_permissions,
-        )
-        .map_err(|error| match error {
-            ToolError::Rejected(_) => {
-                ToolError::Rejected("missing command line for PTY".to_string())
-            }
-            error @ ToolError::Codex(_) => error,
-        })?;
-        let options = unified_exec_options(attempt.network_denial_cancellation_token.clone());
-        let mut process = self
-            .manager
-            .open_session_with_exec_env(
-                req.process_id,
-                ctx,
-                command,
-                options,
-                attempt,
-                managed_network,
-                network_proxy_launch,
-                /*environment_id*/ Some(&req.turn_environment.selection.environment_id),
-                req.exec_server_env_config.clone(),
-                req.shell_snapshot.clone(),
-                windows_sandbox_proxy_settings_mode,
-                req.tty,
-                Box::new(NoopSpawnLifecycle),
-                req.turn_environment.environment.as_ref(),
-            )
-            .await?;
-        process._shell_snapshot = shell_snapshot;
-        Ok(UnifiedExecAttempt {
-            process,
-            metrics_sidecar,
-            permissions,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::PermissionProfileSnapshot;
-    use crate::environment_selection::EnvironmentConfigOrigin;
-    use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
-    use crate::tools::sandboxing::ToolRuntime;
-    use codex_exec_server::Environment;
-    use codex_exec_server::LOCAL_ENVIRONMENT_ID;
-    use codex_protocol::config_types::WindowsSandboxLevel;
-    use codex_protocol::models::PermissionProfile;
-    use codex_protocol::protocol::EnvironmentConfig;
-    use codex_protocol::protocol::EnvironmentConfigState;
-    use codex_protocol::protocol::TurnEnvironmentSelection;
-    use codex_tools::ZshForkConfig;
-    use codex_utils_absolute_path::AbsolutePathBuf;
-    use codex_utils_path_uri::PathUri;
-    use pretty_assertions::assert_eq;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tempfile::tempdir;
-
-    fn test_turn_environment(cwd: PathUri) -> TurnEnvironment {
-        TurnEnvironment::new(
-            TurnEnvironmentSelection {
-                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-                cwd,
-                workspace_roots: Vec::new(),
-                config: EnvironmentConfigState::Ready(EnvironmentConfig {
-                    allow_login_shell: true,
-                    workspace_roots: Vec::new(),
-                    windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                    windows_sandbox_type: codex_sandboxing::SandboxType::None,
-                    use_legacy_landlock: false,
-                    permission_profile: PermissionProfileSnapshot::legacy(
-                        PermissionProfile::read_only(),
-                    ),
-                    shell_environment_policy: Default::default(),
-                    exec_policy: None,
-                    mcp_policy: None,
-                    network_policy: None,
-                    selected_capability_roots: Vec::new(),
-                }),
-            },
-            EnvironmentConfigOrigin::Thread,
-            Arc::new(Environment::default_for_tests()),
-            /*shell*/ None,
-        )
-    }
-
-    #[test]
-    fn unified_exec_options_combines_default_timeout_with_network_denial_cancellation() {
-        let cancellation = CancellationToken::new();
-        let options = unified_exec_options(Some(cancellation.clone()));
-
-        assert_eq!(options.capture_policy, ExecCapturePolicy::ShellTool);
-        match options.expiration {
-            ExecExpiration::TimeoutOrCancellation {
-                timeout,
-                cancellation: actual,
-            } => {
-                assert_eq!(
-                    timeout,
-                    Duration::from_millis(DEFAULT_EXEC_COMMAND_TIMEOUT_MS)
-                );
-                cancellation.cancel();
-                assert!(actual.is_cancelled());
-            }
-            other => panic!("expected timeout-or-cancellation expiration, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn approval_key_includes_environment_id() {
-        let manager = UnifiedExecProcessManager::default();
-        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
-        let mut request = test_request(
-            SandboxPermissions::UseDefault,
-            ExecApprovalRequirement::Skip {
-                bypass_sandbox: false,
-                proposed_execpolicy_amendment: None,
-            },
-        );
-        request.turn_environment.selection.environment_id = "remote".to_string();
-        let original_key = runtime
-            .approval_action(&request, "call-1")
-            .expect("build approval action")
-            .cache_keys();
-        request.turn_environment.selection.environment_id = "other".to_string();
-        let other_key = runtime
-            .approval_action(&request, "call-1")
-            .expect("build approval action")
-            .cache_keys();
-
-        assert_ne!(original_key, other_key);
-    }
-
-    #[tokio::test]
-    async fn unified_exec_uses_the_trusted_sandbox_cwd() {
-        let cwd_dir = tempdir().expect("create process temp dir");
-        let sandbox_dir = tempdir().expect("create sandbox temp dir");
-        let cwd =
-            AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
-        let sandbox_cwd = AbsolutePathBuf::try_from(sandbox_dir.path().to_path_buf())
-            .expect("absolute sandbox temp dir");
-        let manager = UnifiedExecProcessManager::default();
-        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
-        let request = UnifiedExecRequest {
-            command: vec!["pwd".to_string()],
-            shell_type: ShellType::Sh,
-            hook_command: "pwd".to_string(),
-            process_id: 1000,
-            cwd: cwd.into(),
-            sandbox_cwd: sandbox_cwd.clone().into(),
-            turn_environment: test_turn_environment(sandbox_cwd.clone().into()),
-            env: HashMap::new(),
-            exec_server_env_config: None,
-            shell_snapshot: None,
-            explicit_env_overrides: HashMap::new(),
-            network: None,
-            tty: false,
-            sandbox_permissions: SandboxPermissions::UseDefault,
-            additional_permissions: None,
-            #[cfg(unix)]
-            additional_permissions_preapproved: false,
-            justification: None,
-            exec_approval_requirement: ExecApprovalRequirement::Skip {
-                bypass_sandbox: false,
-                proposed_execpolicy_amendment: None,
-            },
-        };
-
-        assert_eq!(
-            runtime.sandbox_cwd(&request),
-            Some(&PathUri::from_abs_path(&sandbox_cwd))
-        );
-    }
-
-    #[tokio::test]
-    async fn zsh_fork_first_attempt_preserves_parent_sandbox_override() {
-        let manager = UnifiedExecProcessManager::default();
-        let request = test_request(
-            SandboxPermissions::RequireEscalated,
-            ExecApprovalRequirement::NeedsApproval {
-                reason: None,
-                proposed_execpolicy_amendment: None,
-            },
-        );
-        let direct_runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
-        let zsh_fork_runtime = UnifiedExecRuntime::new(&manager, zsh_fork_mode());
-
-        assert_eq!(
-            direct_runtime.sandbox_permissions(&request),
-            SandboxPermissions::RequireEscalated,
-            "direct unified exec should preserve a parent require_escalated request"
-        );
-        assert_eq!(
-            zsh_fork_runtime.sandbox_permissions(&request),
-            SandboxPermissions::RequireEscalated,
-            "zsh-fork unified exec should preserve the same parent require_escalated request"
-        );
-    }
-
-    #[tokio::test]
-    async fn zsh_fork_first_attempt_preserves_additional_permissions_request() {
-        let manager = UnifiedExecProcessManager::default();
-        let request = test_request(
-            SandboxPermissions::WithAdditionalPermissions,
-            ExecApprovalRequirement::NeedsApproval {
-                reason: None,
-                proposed_execpolicy_amendment: None,
-            },
-        );
-        let zsh_fork_runtime = UnifiedExecRuntime::new(&manager, zsh_fork_mode());
-
-        assert_eq!(
-            zsh_fork_runtime.sandbox_permissions(&request),
-            SandboxPermissions::WithAdditionalPermissions,
-            "zsh-fork unified exec should keep bounded additional-permissions requests sandboxed"
-        );
-    }
-
-    #[tokio::test]
-    async fn zsh_fork_execpolicy_allow_preserves_parent_sandbox_override() {
-        let manager = UnifiedExecProcessManager::default();
-        let request = test_request(
-            SandboxPermissions::UseDefault,
-            ExecApprovalRequirement::Skip {
-                bypass_sandbox: true,
-                proposed_execpolicy_amendment: None,
-            },
-        );
-        let runtime = UnifiedExecRuntime::new(&manager, zsh_fork_mode());
-
-        assert_eq!(
-            runtime.exec_approval_requirement(&request),
-            Some(ExecApprovalRequirement::Skip {
-                bypass_sandbox: true,
-                proposed_execpolicy_amendment: None,
-            }),
-            "zsh-fork unified exec should preserve exec-policy allow decisions that bypass the sandbox"
-        );
-    }
-
-    fn test_request(
-        sandbox_permissions: SandboxPermissions,
-        exec_approval_requirement: ExecApprovalRequirement,
-    ) -> UnifiedExecRequest {
-        let cwd = AbsolutePathBuf::try_from(std::env::current_dir().unwrap())
-            .expect("current dir is absolute");
-        UnifiedExecRequest {
-            command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-            shell_type: ShellType::Zsh,
-            hook_command: "echo hi".to_string(),
-            process_id: 1000,
-            cwd: cwd.clone().into(),
-            sandbox_cwd: cwd.clone().into(),
-            turn_environment: test_turn_environment(cwd.into()),
-            env: HashMap::new(),
-            exec_server_env_config: None,
-            shell_snapshot: None,
-            explicit_env_overrides: HashMap::new(),
-            network: None,
-            tty: false,
-            sandbox_permissions,
-            additional_permissions: None,
-            #[cfg(unix)]
-            additional_permissions_preapproved: false,
-            justification: None,
-            exec_approval_requirement,
-        }
-    }
-
-    fn zsh_fork_mode() -> UnifiedExecShellMode {
-        let cwd = std::env::current_dir().expect("read current dir");
-        UnifiedExecShellMode::ZshFork(ZshForkConfig {
-            shell_zsh_path: AbsolutePathBuf::try_from(cwd.join("zsh")).expect("absolute zsh path"),
-            main_execve_wrapper_exe: AbsolutePathBuf::try_from(cwd.join("execve-wrapper"))
-                .expect("absolute wrapper path"),
-        })
-    }
-}

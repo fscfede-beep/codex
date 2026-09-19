@@ -23,6 +23,8 @@ use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_sandboxing::SandboxType;
@@ -92,10 +94,19 @@ impl ApplyPatchRuntime {
             return None;
         }
 
-        let permissions = effective_permission_profile(
-            attempt.exec_server_permissions,
-            req.additional_permissions.as_ref(),
-        );
+        let permissions = if req.action.is_destructive() {
+            PermissionProfile::workspace_write_with_path_uris(
+                attempt.workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            effective_permission_profile(
+                attempt.exec_server_permissions,
+                req.additional_permissions.as_ref(),
+            )
+        };
         Some(FileSystemSandboxContext {
             permissions,
             cwd: attempt.sandbox_cwd.clone(),
@@ -115,10 +126,10 @@ impl ApplyPatchRuntime {
 
 impl Sandboxable for ApplyPatchRuntime {
     fn sandbox_preference(&self) -> SandboxablePreference {
-        SandboxablePreference::Auto
+        SandboxablePreference::Require
     }
     fn escalate_on_failure(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -150,7 +161,16 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
     ) -> Option<ExecApprovalRequirement> {
         Some(req.exec_approval_requirement.clone())
     }
-}
+
+    fn allow_destructive_filesystem_effects(
+        &self,
+        req: &ApplyPatchRequest,
+        already_approved: bool,
+    ) -> bool {
+        already_approved && req.action.is_destructive()
+    }
+
+
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
@@ -171,31 +191,52 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         attempt: &SandboxAttempt<'_>,
         _ctx: &ToolCtx,
     ) -> Result<ApplyPatchRuntimeOutput, ToolError> {
+        if !attempt.sandbox_requested || attempt.sandbox == SandboxType::None {
+            return Err(ToolError::Rejected(
+                "apply_patch requires an enforceable sandbox".to_string(),
+            ));
+        }
         let started_at = Instant::now();
         let fs = req.turn_environment.environment.get_filesystem();
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_options(
-            &req.action.patch,
-            ApplyPatchOptions {
-                update_file_mode: req.action.update_file_mode(),
-                // Only reject links when an otherwise-required sandbox was bypassed.
-                // Executor-managed sandboxes can have SandboxType::None.
-                follow_symlinks: attempt.sandbox_requested
-                    || !attempt.manager.should_sandbox(
-                        attempt.permissions,
-                        self.sandbox_preference(),
-                        attempt.enforce_managed_network,
-                    ),
-            },
-            &req.action.cwd,
-            &mut stdout,
-            &mut stderr,
-            fs.as_ref(),
-            sandbox.as_ref(),
-        )
-        .await;
+        let result = if req.action.is_destructive() {
+            codex_apply_patch::apply_patch_with_destructive_targets(
+                &req.action.patch,
+                ApplyPatchOptions {
+                    update_file_mode: req.action.update_file_mode(),
+                    follow_symlinks: false,
+                },
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+                req.action.destructive_targets(),
+            )
+            .await
+        } else {
+            codex_apply_patch::apply_patch_with_options(
+                &req.action.patch,
+                ApplyPatchOptions {
+                    update_file_mode: req.action.update_file_mode(),
+                    // Preserve existing non-destructive behavior.
+                    follow_symlinks: attempt.sandbox_requested
+                        || !attempt.manager.should_sandbox(
+                            attempt.permissions,
+                            self.sandbox_preference(),
+                            attempt.enforce_managed_network,
+                        ),
+                },
+                &req.action.cwd,
+                &mut stdout,
+                &mut stderr,
+                fs.as_ref(),
+                sandbox.as_ref(),
+            )
+            .await
+        };
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let failed = result.is_err();

@@ -565,6 +565,7 @@ impl MessageProcessor {
         let fs_processor = FsRequestProcessor::new(
             Arc::clone(&environment_manager_for_requests),
             FsWatchManager::new(outgoing.clone()),
+            config.codex_home.to_path_buf(),
         );
         let windows_sandbox_processor = WindowsSandboxRequestProcessor::new(
             outgoing.clone(),

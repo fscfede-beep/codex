@@ -46,6 +46,28 @@ pub fn run_main() -> i32 {
         return 2;
     }
 
+    // Standalone apply_patch has no governed approval or scoped deletion capability.
+    // Keep non-destructive patching available, but fail closed for DeleteFile/Move.
+    match crate::parse_patch(&patch_arg) {
+        Ok(parsed) if parsed.hunks.iter().any(|hunk| {
+            matches!(
+                hunk,
+                crate::Hunk::DeleteFile { .. }
+                    | crate::Hunk::UpdateFile {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        }) => {
+            eprintln!(
+                "Error: standalone apply_patch DeleteFile/Move requires governed approval and sandbox authority."
+            );
+            return 1;
+        }
+        Ok(_) => {}
+        Err(_) => {}
+    }
+
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {

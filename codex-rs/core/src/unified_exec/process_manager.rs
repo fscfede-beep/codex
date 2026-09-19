@@ -1408,6 +1408,7 @@ impl UnifiedExecProcessManager {
                     network_proxy_restricting_sid: network_proxy_restricting_sid.as_deref(),
                     proxy_settings_mode: windows_sandbox_proxy_settings_mode,
                     filesystem_overrides: request.windows_sandbox_filesystem_overrides.as_ref(),
+                    allow_destructive_filesystem_effects: request.allow_destructive_filesystem_effects,
                 })
             } else {
                 None

@@ -12,7 +12,6 @@ use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
 use crate::GetMetadataOptions;
 use crate::ReadFileOptions;
-use crate::RemoveOptions;
 use crate::WriteFileOptions;
 use crate::file_read::FileReadHandleManager;
 use crate::local_file_system::LocalFileSystem;
@@ -297,23 +296,11 @@ impl FileSystemHandler {
 
     pub(crate) async fn remove(
         &self,
-        params: FsRemoveParams,
+        _params: FsRemoveParams,
     ) -> Result<FsRemoveResponse, JSONRPCErrorError> {
-        let recursive = params.recursive.unwrap_or(true);
-        let force = params.force.unwrap_or(true);
-        self.file_system
-            .remove(
-                &params.path,
-                RemoveOptions {
-                    recursive,
-                    force,
-                    follow_symlinks: params.follow_symlinks.unwrap_or(true),
-                },
-                params.sandbox.as_ref(),
-            )
-            .await
-            .map_err(map_fs_error)?;
-        Ok(FsRemoveResponse {})
+        Err(invalid_request(
+            "fs/remove is disabled because this RPC has no scoped deletion authority",
+        ))
     }
 
     pub(crate) async fn copy(

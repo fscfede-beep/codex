@@ -133,6 +133,10 @@ pub struct LandlockCommand {
     )]
     pub managed_network: Option<ManagedNetworkSandboxContext>,
 
+    /// Internal: deny filesystem unlink/rmdir/rename/hard-link effects for the launched process.
+    #[arg(long = "deny-filesystem-delete", hide = true, default_value_t = false)]
+    pub deny_filesystem_delete: bool,
+
     /// Internal route spec used for managed proxy routing in bwrap mode.
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
@@ -167,6 +171,7 @@ pub fn run_main() -> ! {
         use_legacy_landlock,
         apply_seccomp_then_exec,
         managed_network,
+        deny_filesystem_delete,
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
@@ -234,6 +239,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             proxy_routing_active,
+            deny_filesystem_delete,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -280,6 +286,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             /*proxy_routing_active*/ false,
+            deny_filesystem_delete,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -327,6 +334,7 @@ pub fn run_main() -> ! {
             command_cwd: command_cwd.as_deref(),
             permission_profile: &permission_profile,
             managed_network,
+            deny_filesystem_delete,
             proxy_route_spec,
             command,
         });
@@ -1515,6 +1523,7 @@ struct InnerSeccompCommandArgs<'a> {
     command_cwd: Option<&'a Path>,
     permission_profile: &'a PermissionProfile,
     managed_network: Option<ManagedNetworkSandboxContext>,
+    deny_filesystem_delete: bool,
     proxy_route_spec: Option<String>,
     command: Vec<String>,
 }
@@ -1552,6 +1561,9 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile_json,
         "--apply-seccomp-then-exec".to_string(),
     ]);
+    if deny_filesystem_delete {
+        inner.push("--deny-filesystem-delete".to_string());
+    }
     if let Some(managed_network) = managed_network {
         inner.push("--managed-network".to_string());
         inner.push(

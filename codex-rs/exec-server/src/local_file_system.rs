@@ -7,7 +7,42 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
+#[cfg(windows)]
+use std::ptr;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -234,6 +269,74 @@ impl LocalFileSystem {
         file_system.walk(path, options, sandbox).await
     }
 
+    async fn get_object_identity(
+        &self,
+        path: &PathUri,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<Option<FileSystemObjectIdentity>> {
+        if let Some(sandbox) = sandbox {
+            let policy = sandbox.permissions.file_system_sandbox_policy();
+            if !policy.can_write_path(path, &sandbox.policy_context()) {
+                return Ok(None);
+            }
+        }
+        let path = path.to_abs_path()?;
+        let metadata = std::fs::symlink_metadata(path.as_path())?;
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        {
+            return Ok(Some(FileSystemObjectIdentity::new(
+                format!("unix:{:016x}:{:016x}", metadata.dev(), metadata.ino()),
+                metadata.nlink(),
+            )));
+        }
+        #[cfg(windows)]
+        {
+            let wide = path
+                .as_path()
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    FILE_READ_ATTRIBUTES | READ_CONTROL,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    0,
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            let guard = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Ok(None);
+            }
+            let _guard = guard;
+            return Ok(Some(FileSystemObjectIdentity::new(
+                format!(
+                    "windows:{:08x}:{:08x}{:08x}",
+                    info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+                ),
+                u64::from(info.nNumberOfLinks),
+            )));
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(None)
+        }
+    }
+
     async fn remove(
         &self,
         path: &PathUri,
@@ -331,6 +434,14 @@ impl ExecutorFileSystem for LocalFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
         Box::pin(LocalFileSystem::walk(self, path, options, sandbox))
+    }
+
+    fn get_object_identity<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Option<FileSystemObjectIdentity>> {
+        Box::pin(LocalFileSystem::get_object_identity(self, path, sandbox))
     }
 
     fn remove<'a>(

@@ -15,9 +15,9 @@ use crate::spawn_prep::LegacyAclSids;
 use crate::spawn_prep::LegacySessionSecurity;
 use crate::spawn_prep::SpawnPrepOptions;
 use crate::spawn_prep::allow_null_device_for_workspace_write;
-use crate::spawn_prep::apply_legacy_session_acl_rules;
+use crate::spawn_prep::apply_legacy_session_acl_rules_with_destructive;
 use crate::spawn_prep::legacy_session_capability_roots;
-use crate::spawn_prep::prepare_legacy_session_security;
+use crate::spawn_prep::prepare_legacy_session_security_with_destructive;
 use crate::spawn_prep::prepare_legacy_spawn_context;
 use anyhow::Result;
 use codex_protocol::models::PermissionProfile;
@@ -326,6 +326,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     additional_deny_write_paths: &[AbsolutePathBuf],
     tty: bool,
     stdin_open: bool,
+    allow_destructive_filesystem_effects: bool,
     private_desktop_name: Option<String>,
 ) -> Result<SpawnedProcess> {
     let common = prepare_legacy_spawn_context(
@@ -358,15 +359,16 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
         &env_map,
         codex_home,
     );
-    let security = prepare_legacy_session_security(
+    let security = prepare_legacy_session_security_with_destructive(
         common.uses_write_capabilities,
+        allow_destructive_filesystem_effects,
         codex_home,
         cwd,
         capability_roots,
     )?;
     allow_null_device_for_workspace_write(common.uses_write_capabilities);
 
-    apply_legacy_session_acl_rules(
+    apply_legacy_session_acl_rules_with_destructive(
         &common.permissions,
         codex_home,
         &common.current_dir,
@@ -378,6 +380,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
             readonly_sid_str: security.readonly_sid_str.as_deref(),
             write_root_sids: &security.write_root_sids,
         },
+        allow_destructive_filesystem_effects,
     )?;
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);

@@ -39,6 +39,31 @@ use std::task::Poll;
 
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Opaque identity of a concrete filesystem object on the selected executor.
+///
+/// Destructive operations may use this value to detect replacement of the
+/// approved object between authorization and execution. Backends that cannot
+/// prove object identity must return None; callers must fail closed for
+/// destructive effects rather than substituting path-only authorization.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct FileSystemObjectIdentity {
+    value: String,
+    link_count: u64,
+}
+
+impl FileSystemObjectIdentity {
+    pub fn new(value: impl Into<String>, link_count: u64) -> Self {
+        Self {
+            value: value.into(),
+            link_count,
+        }
+    }
+
+    pub fn link_count(&self) -> u64 {
+        self.link_count
+    }
+}
 /// Maximum accepted directory depth for a filesystem walk.
 pub const MAX_WALK_DEPTH: usize = 64;
 /// Maximum accepted directory count, including the walk root.
@@ -362,6 +387,8 @@ pub struct FileSystemSandboxContext {
     pub temporary_directories: Option<Vec<PathUri>>,
     #[serde(rename = "windowsSandboxLevel")]
     pub windows_sandbox_selection: WindowsSandboxSelection,
+    #[serde(default)]
+    pub windows_sandbox_private_desktop: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_sandbox_proxy_settings_mode: Option<WindowsSandboxProxySettingsMode>,
     #[serde(default)]
@@ -397,6 +424,7 @@ impl FileSystemSandboxContext {
             user_home_dir: None,
             temporary_directories: None,
             windows_sandbox_selection: WindowsSandboxSelection::Disabled,
+            windows_sandbox_private_desktop: false,
             windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: false,
         }
@@ -473,6 +501,8 @@ pub struct WireFileSystemSandboxContext {
     temporary_directories: Option<Vec<PathUri>>,
     #[serde(rename = "windowsSandboxLevel")]
     windows_sandbox_selection: WindowsSandboxSelection,
+    #[serde(default)]
+    windows_sandbox_private_desktop: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     windows_sandbox_proxy_settings_mode: Option<WindowsSandboxProxySettingsMode>,
     #[serde(default)]
@@ -498,6 +528,7 @@ impl From<FileSystemSandboxContext> for WireFileSystemSandboxContext {
             user_home_dir,
             temporary_directories,
             windows_sandbox_selection,
+            windows_sandbox_private_desktop,
             windows_sandbox_proxy_settings_mode,
             use_legacy_landlock,
         } = sandbox;
@@ -542,6 +573,7 @@ impl From<FileSystemSandboxContext> for WireFileSystemSandboxContext {
             user_home_dir,
             temporary_directories,
             windows_sandbox_selection,
+            windows_sandbox_private_desktop,
             windows_sandbox_proxy_settings_mode,
             use_legacy_landlock,
         }
@@ -588,6 +620,7 @@ impl WireFileSystemSandboxContext {
             user_home_dir: self.user_home_dir,
             temporary_directories: self.temporary_directories,
             windows_sandbox_selection: self.windows_sandbox_selection,
+            windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
             windows_sandbox_proxy_settings_mode: self.windows_sandbox_proxy_settings_mode,
             use_legacy_landlock: self.use_legacy_landlock,
         }
@@ -680,6 +713,21 @@ pub trait ExecutorFileSystem: Send + Sync {
         options: GetMetadataOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata>;
+
+    /// Returns a stable identity for the concrete object at path.
+    ///
+    /// Implementations must return None when the platform/backend cannot
+    /// provide an identity that is safe to use for destructive revalidation.
+    fn get_object_identity<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Option<FileSystemObjectIdentity>> {
+        Box::pin(async move {
+            let _ = (path, sandbox);
+            Ok(None)
+        })
+    }
 
     fn read_directory<'a>(
         &'a self,

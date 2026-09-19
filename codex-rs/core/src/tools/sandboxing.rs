@@ -364,6 +364,35 @@ pub(crate) enum ToolError {
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
+    /// Select a sandbox preference for the concrete request. Destructive requests can force
+    /// sandboxing without changing the tool's default behavior for ordinary requests.
+    fn sandbox_preference_for_request(&self, _req: &Req) -> SandboxablePreference {
+        self.sandbox_preference()
+    }
+
+    /// Control whether a sandbox denial may be retried with weaker isolation.
+    fn escalate_on_failure_for_request(&self, _req: &Req) -> bool {
+        self.escalate_on_failure()
+    }
+
+    /// Return the effective filesystem permission profile for this request.
+    /// Implementations may narrow authority for high-risk effects without changing the
+    /// turn-wide profile.
+    fn permission_profile_for_request(
+        &self,
+        _req: &Req,
+        permissions: &codex_protocol::models::PermissionProfile,
+        _workspace_roots: &[PathUri],
+    ) -> codex_protocol::models::PermissionProfile {
+        permissions.clone()
+    }
+
+    /// Grants the OS-level delete capability only to a request whose destructive effect
+    /// has already received fresh approval. The default is fail-closed.
+    fn allow_destructive_filesystem_effects(&self, _req: &Req, _already_approved: bool) -> bool {
+        false
+    }
+
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
         false
     }
@@ -403,6 +432,9 @@ pub(crate) struct SandboxAttempt<'a> {
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
     pub network_denial_cancellation_token: Option<CancellationToken>,
     pub(crate) network_proxy: Option<&'a NetworkProxy>,
+    /// Ephemeral OS capability: may this attempt delete/rename filesystem objects?
+    /// Never serialized and never persisted.
+    pub allow_destructive_filesystem_effects: bool,
 }
 
 pub(crate) fn executor_windows_sandbox_level(
@@ -480,8 +512,11 @@ impl<'a> SandboxAttempt<'a> {
         environment_id: Option<&str>,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
         let network = self.network_proxy(network);
-        let request = self
+        let manager = self
             .manager
+            .clone()
+            .with_allow_destructive_filesystem_effects(self.allow_destructive_filesystem_effects);
+        let request = manager
             .transform(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
@@ -493,6 +528,7 @@ impl<'a> SandboxAttempt<'a> {
                 sandbox_exe: self.sandbox_exe.map(std::path::PathBuf::as_path),
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
+                allow_destructive_filesystem_effects: self.allow_destructive_filesystem_effects,
             })
             .map_err(CodexErr::from)?;
         let workspace_roots = self
@@ -527,6 +563,7 @@ impl<'a> SandboxAttempt<'a> {
                 sandbox_exe: None,
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
+                allow_destructive_filesystem_effects: false,
             })
             .map_err(CodexErr::from)?;
         let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(

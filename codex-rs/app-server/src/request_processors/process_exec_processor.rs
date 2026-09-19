@@ -68,80 +68,15 @@ impl ProcessExecRequestProcessor {
 
     pub(crate) async fn process_spawn(
         &self,
-        request_id: ConnectionRequestId,
-        params: ProcessSpawnParams,
+        _request_id: ConnectionRequestId,
+        _params: ProcessSpawnParams,
     ) -> Result<(), JSONRPCErrorError> {
         self.require_local_environment()?;
-        let ProcessSpawnParams {
-            command,
-            process_handle,
-            cwd,
-            tty,
-            stream_stdin,
-            stream_stdout_stderr,
-            output_bytes_cap,
-            timeout_ms,
-            env: env_overrides,
-            size,
-        } = params;
-        let method_name = "process/spawn";
-        tracing::debug!("{method_name} command: {command:?}");
-        if command.is_empty() {
-            return Err(invalid_request("command must not be empty"));
-        }
-        if process_handle.is_empty() {
-            return Err(invalid_request("processHandle must not be empty"));
-        }
-        if size.is_some() && !tty {
-            return Err(invalid_params("process/spawn size requires tty: true"));
-        }
-        let mut env = std::env::vars().collect::<HashMap<_, _>>();
-        if let Some(env_overrides) = env_overrides {
-            for (key, value) in env_overrides {
-                match value {
-                    Some(value) => {
-                        env.insert(key, value);
-                    }
-                    None => {
-                        env.remove(&key);
-                    }
-                }
-            }
-        }
-        env.retain(|name, _| !is_non_inheritable_env_var(name));
-        let expiration = match timeout_ms {
-            Some(Some(timeout_ms)) => match u64::try_from(timeout_ms) {
-                Ok(timeout_ms) => timeout_ms.into(),
-                Err(_) => {
-                    return Err(invalid_params(format!(
-                        "{method_name} timeoutMs must be non-negative, got {timeout_ms}"
-                    )));
-                }
-            },
-            Some(None) => ExecExpiration::Cancellation(CancellationToken::new()),
-            None => ExecExpiration::DefaultTimeout,
-        };
-        let output_bytes_cap = output_bytes_cap.unwrap_or(Some(DEFAULT_OUTPUT_BYTES_CAP));
-        let size = size.map(terminal_size_from_protocol).transpose()?;
-
-        self.process_exec_manager
-            .start(StartProcessParams {
-                outgoing: self.outgoing.clone(),
-                request_id,
-                process_handle,
-                command,
-                cwd,
-                env,
-                expiration,
-                tty,
-                stream_stdin,
-                stream_stdout_stderr,
-                output_bytes_cap,
-                size,
-            })
-            .await?;
-
-        Ok(())
+        // This app-server surface has no governed approval, permission profile,
+        // or sandbox capability in its protocol request.
+        Err(invalid_request(
+            "process/spawn is disabled because this RPC has no governed approval and sandbox authority",
+        ))
     }
 
     pub(crate) async fn process_write_stdin(
