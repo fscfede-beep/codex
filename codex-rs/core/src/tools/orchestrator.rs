@@ -261,7 +261,7 @@ impl ToolOrchestrator {
         } else {
             turn_ctx.network.is_some()
         };
-        let sandbox_preference = tool.sandbox_preference();
+        let sandbox_preference = tool.sandbox_preference_for_request(req);
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => sandbox_manager.should_sandbox(
