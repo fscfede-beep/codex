@@ -20,6 +20,8 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxPermissions;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
+use codex_shell_command::DangerousCommandPlatform;
+use codex_shell_command::is_destructive_interactive_input;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 
 #[derive(Clone, Copy)]
@@ -141,6 +143,7 @@ impl TerminalPermissions {
     fn approval_reason(
         &self,
         sandbox_permissions: SandboxPermissions,
+        destructive_input: bool,
     ) -> Result<String, serde_json::Error> {
         let authority = if self.launch_permissions.requires_escalated_permissions() {
             "This terminal was launched outside the sandbox, bypassing any managed network proxy."
@@ -157,7 +160,13 @@ impl TerminalPermissions {
                 }
             }
         };
-        let mut reason = format!("Send input to an existing terminal. {authority}");
+        let mut reason = if destructive_input {
+            format!(
+                "Send input to an existing terminal. This input is classified as potentially destructive and requires fresh user approval. {authority}"
+            )
+        } else {
+            format!("Send input to an existing terminal. {authority}")
+        };
         if self.internal_permissions.is_some() {
             reason.push_str(" It also has an internal filesystem grant.");
         }
@@ -181,9 +190,31 @@ impl ProcessEntry {
         input: &str,
         strict_auto_review: bool,
     ) -> Result<Option<(ApprovalAction, String)>, UnifiedExecError> {
-        if input.is_empty()
-            || (!self.tty && input == "\u{3}")
-            || !context
+        if input.is_empty() || (!self.tty && input == "\u{3}") {
+            return Ok(None);
+        }
+
+        let input_is_control_only = input.chars().all(char::is_control);
+        let unsandboxed_terminal = self.policy.sandbox.permissions == PermissionProfile::Disabled
+            || self.launch_permissions.requires_escalated_permissions();
+
+        // A terminal launched without a filesystem sandbox is an interactive command channel.
+        // Non-empty text can introduce arbitrary new commands after the original approval.
+        // Require a new command invocation instead of allowing a second unreviewed authority hop.
+        if unsandboxed_terminal && !input_is_control_only {
+            return Err(approval_error(
+                "non-empty input to an unsandboxed terminal is disabled; start a new terminal so the full command can be reviewed",
+            ));
+        }
+
+        let platform = match self.cwd.infer_path_convention() {
+            Some(codex_utils_path_uri::PathConvention::Windows) => DangerousCommandPlatform::Windows,
+            _ => DangerousCommandPlatform::Posix,
+        };
+        let destructive_input = is_destructive_interactive_input(input, platform);
+
+        if !destructive_input
+            && !context
                 .session
                 .features()
                 .enabled(Feature::WriteStdinApproval)
@@ -213,7 +244,10 @@ impl ProcessEntry {
         let sandbox_permissions = permissions
             .review_requirement(&current, environment.permission_profile())
             .map_err(approval_error)?;
-        if sandbox_permissions == SandboxPermissions::UseDefault && !strict_auto_review {
+        if !destructive_input
+            && sandbox_permissions == SandboxPermissions::UseDefault
+            && !strict_auto_review
+        {
             return Ok(None);
         }
         // Manual approvals shell-quote the input, which cannot preserve NUL bytes.
@@ -223,7 +257,7 @@ impl ProcessEntry {
             ));
         }
         let reason = permissions
-            .approval_reason(sandbox_permissions)
+            .approval_reason(sandbox_permissions, destructive_input)
             .map_err(approval_error)?;
         let action = ApprovalAction::WriteStdin {
             id: self.call_id.clone(),
