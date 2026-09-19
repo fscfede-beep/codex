@@ -446,7 +446,7 @@ async fn run_git_command(
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-.env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_OPTIONAL_LOCKS", "0")
                 .env("GIT_ALLOW_PROTOCOL", "")
                 .env("GIT_NO_LAZY_FETCH", "1"),
         )
@@ -533,6 +533,57 @@ mod tests {
             }
         );
         assert!(runner.saw(&["git", "merge-base", "HEAD", "refs/remotes/origin/main"]));
+    }
+
+    #[tokio::test]
+    async fn branch_diff_stats_falls_back_locally_without_remote_show() {
+        let runner = FakeRunner::new(vec![
+            response(
+                &["git", "rev-parse", "--git-dir"],
+                /*exit_code*/ 0,
+                ".git\n",
+            ),
+            response(&["git", "remote"], /*exit_code*/ 0, "origin\n"),
+            response(
+                &["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                /*exit_code*/ 1,
+                "",
+            ),
+            response(
+                &[
+                    "git",
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/main",
+                ],
+                /*exit_code*/ 0,
+                "main-sha\n",
+            ),
+            response(
+                &["git", "merge-base", "HEAD", "refs/heads/main"],
+                /*exit_code*/ 0,
+                "base-sha\n",
+            ),
+            response(
+                &["git", "diff", "--numstat", "base-sha..HEAD"],
+                /*exit_code*/ 0,
+                "2\t1\tfile\n",
+            ),
+        ]);
+
+        let stats = branch_diff_stats_to_default_branch(&runner, Path::new("/repo"))
+            .await
+            .expect("branch diff stats");
+
+        assert_eq!(
+            stats,
+            GitBranchDiffStats {
+                additions: 2,
+                deletions: 1,
+            }
+        );
+        assert!(!runner.saw(&["git", "remote", "show", "origin"]));
     }
 
     #[tokio::test]
@@ -686,9 +737,9 @@ mod tests {
                     1..1,
                     [
                         "-c".to_string(),
-                        codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
-                    "-c".to_string(),
-                    "core.sshCommand=".to_string(),
+                            codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
                     ],
                 );
             }
