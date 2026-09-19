@@ -116,6 +116,7 @@ fn restricted_policies_deny_mutating_fcntls_through_read_only_descriptors() {
             environment_id: None,
             network: None,
             extra_allow_unix_sockets: &[],
+            allow_destructive_filesystem_effects: false,
         })
         .expect("generated Seatbelt arguments");
         let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
