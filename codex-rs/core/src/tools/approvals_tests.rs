@@ -235,3 +235,75 @@ async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
         }
     }
 }
+
+#[test]
+fn destructive_apply_patch_requires_fresh_human_approval() {
+    let changes = Arc::new(HashMap::from([(
+        PathBuf::from("delete.txt"),
+        FileChange::Delete {
+            content: "old".to_string(),
+        },
+    )]));
+    assert!(ApprovalAction::apply_patch_requires_fresh_human_approval(&changes));
+}
+
+#[test]
+fn moving_apply_patch_requires_fresh_human_approval() {
+    let changes = Arc::new(HashMap::from([(
+        PathBuf::from("old.txt"),
+        FileChange::Update {
+            unified_diff: String::new(),
+            move_path: Some(PathBuf::from("new.txt")),
+        },
+    )]));
+    assert!(ApprovalAction::apply_patch_requires_fresh_human_approval(&changes));
+}
+
+#[test]
+fn ordinary_apply_patch_keeps_session_cache_path() {
+    let changes = Arc::new(HashMap::from([(
+        PathBuf::from("update.txt"),
+        FileChange::Update {
+            unified_diff: "@@".to_string(),
+            move_path: None,
+        },
+    )]));
+    assert!(!ApprovalAction::apply_patch_requires_fresh_human_approval(&changes));
+    let action = ApprovalAction::ApplyPatch {
+        id: "call-1".to_string(),
+        environment_id: "env-1".to_string(),
+        cwd: PathUri::parse("file:///tmp").expect("path"),
+        files: vec![PathUri::parse("file:///tmp/update.txt").expect("path")],
+        patch: "*** Begin Patch
+*** Update File: update.txt
+@@
+-old
++new
+*** End Patch".to_string(),
+        changes,
+        permissions_preapproved: false,
+    };
+    assert_eq!(action.cache_keys().len(), 1);
+}
+
+#[test]
+fn destructive_apply_patch_disables_session_cache() {
+    let changes = Arc::new(HashMap::from([(
+        PathBuf::from("delete.txt"),
+        FileChange::Delete {
+            content: "old".to_string(),
+        },
+    )]));
+    let action = ApprovalAction::ApplyPatch {
+        id: "call-2".to_string(),
+        environment_id: "env-1".to_string(),
+        cwd: PathUri::parse("file:///tmp").expect("path"),
+        files: vec![PathUri::parse("file:///tmp/delete.txt").expect("path")],
+        patch: "*** Begin Patch
+*** Delete File: delete.txt
+*** End Patch".to_string(),
+        changes,
+        permissions_preapproved: true,
+    };
+    assert!(action.cache_keys().is_empty());
+}

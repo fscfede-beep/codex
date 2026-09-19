@@ -209,6 +209,22 @@ impl ApplyPatchAction {
         self.changes.is_empty()
     }
 
+    /// Returns true when applying this action can overwrite, delete, or rename an existing file.
+    /// AddFile is included because it can overwrite an existing target.
+    pub fn is_destructive(&self) -> bool {
+        self.changes.values().any(|change| {
+            matches!(
+                change,
+                ApplyPatchFileChange::Add { .. }
+                    | ApplyPatchFileChange::Delete { .. }
+                    | ApplyPatchFileChange::Update {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    }
+
     /// Returns the changes that would be made by applying the patch.
     pub fn changes(&self) -> &HashMap<PathUri, ApplyPatchFileChange> {
         &self.changes
