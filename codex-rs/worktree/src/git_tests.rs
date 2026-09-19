@@ -78,6 +78,46 @@ fn discovers_filter_drivers_with_dotted_names() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn working_tree_git_blocks_lazy_transport_from_repository_ssh_command() -> Result<()> {
+    let (directory, root) = repository()?;
+    let head = setup_git_stdout(&root, &["rev-parse", "HEAD"])?;
+    let blob = setup_git_stdout(&root, &["rev-parse", "HEAD:tracked.txt"])?;
+    let object = root
+        .join(".git")
+        .join("objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    assert!(object.exists(), "test blob should be a loose object");
+    fs::remove_file(&object)?;
+
+    setup_git(&root, &["remote", "add", "origin", "ssh://example.invalid/repo.git"])?;
+    setup_git(&root, &["config", "remote.origin.promisor", "true"])?;
+    setup_git(&root, &["config", "remote.origin.partialclonefilter", "blob:none"])?;
+
+    let marker = directory.path().join("ssh-command-executed");
+    let helper = directory.path().join("ssh-command");
+    write_marker_script(&helper, &marker)?;
+    setup_git(
+        &root,
+        &["config", "core.sshCommand", helper.to_str().context("ssh command path")?],
+    )?;
+
+    let error = git_output(
+        &root,
+        GitOperation::WorkingTree,
+        ["reset", "--hard", head.as_str()],
+    )
+    .expect_err("missing promisor object should fail closed");
+    assert!(error.to_string().contains("git command failed"));
+    assert!(
+        !marker.exists(),
+        "repository-controlled core.sshCommand executed during local Git worktree operation"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn checkout_does_not_execute_configured_hooks_fsmonitor_or_filters() -> Result<()> {
     let (directory, root) = repository()?;
     fs::write(root.join(".gitattributes"), "*.txt filter=x=y -text\n")?;
@@ -152,6 +192,18 @@ fn checkout_does_not_execute_configured_hooks_fsmonitor_or_filters() -> Result<(
         "tracked\n"
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn setup_git_stdout(cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git").current_dir(cwd).args(args).output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git stdout setup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 #[cfg(unix)]
