@@ -46,7 +46,7 @@ fn reduced_permissions_require_review() -> anyhow::Result<()> {
     );
     insta::assert_snapshot!(
         "reduced_permissions",
-        permissions.approval_reason(expected)?
+        permissions.approval_reason(expected, false)?
     );
     Ok(())
 }
@@ -61,7 +61,7 @@ fn proxy_bypass_requires_review_even_when_permissions_match() -> anyhow::Result<
         permissions.review_requirement(&permissions.policy, &baseline),
         Ok(expected)
     );
-    insta::assert_snapshot!("proxy_bypass", permissions.approval_reason(expected)?);
+    insta::assert_snapshot!("proxy_bypass", permissions.approval_reason(expected, false)?);
     Ok(())
 }
 
@@ -142,7 +142,7 @@ async fn captured_network_changes_require_review() -> anyhow::Result<()> {
         permissions.review_requirement(&current, environment.permission_profile()),
         Ok(expected)
     );
-    insta::assert_snapshot!("network_mode", permissions.approval_reason(expected)?);
+    insta::assert_snapshot!("network_mode", permissions.approval_reason(expected, false)?);
 
     environment.config_mut().network_policy = Some(EnvironmentNetworkPolicy::from_config(
         &proxy, /*managed_allowed_domains_only*/ false,
@@ -196,7 +196,7 @@ async fn internal_grants_require_review_without_exposing_paths() -> anyhow::Resu
         Ok(expected)
     );
     assert_eq!(permissions.additional_permissions, None);
-    insta::assert_snapshot!("internal_grant", permissions.approval_reason(expected)?);
+    insta::assert_snapshot!("internal_grant", permissions.approval_reason(expected, false)?);
     Ok(())
 }
 
@@ -291,3 +291,35 @@ async fn enabling_windows_sandbox_respects_the_launch_backend(
     );
     Ok(())
 }
+
+#[test]
+fn destructive_approval_reason_is_explicit() -> anyhow::Result<()> {
+    let permissions = terminal_permissions(&PermissionProfile::workspace_write());
+    let normal = permissions.approval_reason(SandboxPermissions::UseDefault, false)?;
+    let destructive = permissions.approval_reason(SandboxPermissions::UseDefault, true)?;
+    assert!(!normal.contains("potentially destructive"));
+    assert!(destructive.contains("potentially destructive"));
+    assert!(destructive.contains("fresh user approval"));
+    Ok(())
+}
+
+#[test]
+fn destructive_interactive_classifier_is_conservative() {
+    assert!(codex_shell_command::is_destructive_interactive_input(
+        "rm -rf build",
+        codex_shell_command::DangerousCommandPlatform::Posix,
+    ));
+    assert!(codex_shell_command::is_destructive_interactive_input(
+        "python -c 'import os; os.remove("x")'",
+        codex_shell_command::DangerousCommandPlatform::Posix,
+    ));
+    assert!(codex_shell_command::is_destructive_interactive_input(
+        "Remove-Item build -Recurse -Force",
+        codex_shell_command::DangerousCommandPlatform::Windows,
+    ));
+    assert!(!codex_shell_command::is_destructive_interactive_input(
+        "printf hello",
+        codex_shell_command::DangerousCommandPlatform::Posix,
+    ));
+}
+

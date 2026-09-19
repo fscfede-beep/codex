@@ -193,6 +193,92 @@ fn dangerous_command_match_for_trap(
     dangerous_command_match_with_depth(&shell_command, wrapper_depth + 1, platform)
 }
 
+/// Conservatively identifies interactive input that may perform destructive filesystem effects.
+///
+/// Interactive stdin is a second command channel: new bytes can change the effect without
+/// changing the executable/argv that was originally approved.
+pub fn is_destructive_interactive_input(input: &str, platform: DangerousCommandPlatform) -> bool {
+    let lower = input.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    if trimmed.is_empty() || trimmed.chars().all(char::is_control) {
+        return false;
+    }
+
+    let words = || trimmed
+        .split(|c: char| {
+            c.is_ascii_whitespace()
+                || matches!(c, ';' | '|' | '&' | '>' | '<' | '(' | ')' | '{' | '}')
+        })
+        .filter(|word| !word.is_empty());
+
+    match platform {
+        DangerousCommandPlatform::Posix => {
+            if words().any(|word| {
+                matches!(
+                    word,
+                    "rm" | "unlink" | "rmdir" | "shred" | "truncate" | "mv"
+                )
+            }) {
+                return true;
+            }
+            if (trimmed.contains("find ") || trimmed.contains("find\t"))
+                && (trimmed.contains(" -delete")
+                    || trimmed.contains(" -exec ")
+                    || trimmed.contains(" -execdir "))
+            {
+                return true;
+            }
+            if trimmed.contains("rsync")
+                && (trimmed.contains("--delete")
+                    || trimmed.contains("--remove-source-files"))
+            {
+                return true;
+            }
+            if trimmed.contains("git clean")
+                || trimmed.contains("git reset --hard")
+                || trimmed.contains("git checkout --")
+                || trimmed.contains("git restore ")
+            {
+                return true;
+            }
+            trimmed.contains("eval ")
+                || trimmed.contains("bash -c ")
+                || trimmed.contains("sh -c ")
+                || trimmed.contains("zsh -c ")
+                || trimmed.contains("python -c ")
+                || trimmed.contains("python3 -c ")
+                || trimmed.contains("node -e ")
+                || trimmed.contains("node --eval ")
+                || trimmed.contains("perl -e ")
+                || trimmed.contains("ruby -e ")
+        }
+        DangerousCommandPlatform::Windows => {
+            if words().any(|word| {
+                matches!(
+                    word,
+                    "del" | "erase" | "rmdir" | "rd" | "remove-item" | "move-item"
+                )
+            }) {
+                return true;
+            }
+            trimmed.contains("[io.file]::delete")
+                || trimmed.contains("[system.io.file]::delete")
+                || trimmed.contains("[io.directory]::delete")
+                || trimmed.contains("[system.io.directory]::delete")
+                || trimmed.contains("cmd /c ")
+                || trimmed.contains("powershell -command ")
+                || trimmed.contains("pwsh -command ")
+                || trimmed.contains("python -c ")
+                || trimmed.contains("python3 -c ")
+                || trimmed.contains("node -e ")
+                || trimmed.contains("node --eval ")
+                || trimmed.contains("git clean")
+                || trimmed.contains("git reset --hard")
+                || (trimmed.contains("robocopy ") && trimmed.contains("/purge"))
+        }
+    }
+}
+
 fn rm_args_include_force_option(args: &[String]) -> bool {
     args.iter()
         .take_while(|arg| arg.as_str() != "--")
@@ -302,6 +388,35 @@ mod tests {
         ] {
             assert_eq!(dangerous_command_match(&command), None, "{command:?}");
         }
+    }
+
+    #[test]
+    fn interactive_destructive_inputs_are_conservatively_classified() {
+        for input in [
+            "rm -rf build",
+            "find build -delete",
+            "git clean -fd",
+            "python -c 'import os; os.remove(\"x\")'",
+        ] {
+            assert!(is_destructive_interactive_input(
+                input,
+                DangerousCommandPlatform::Posix
+            ));
+        }
+        for input in [
+            "Remove-Item build -Recurse -Force",
+            "[IO.File]::Delete('x')",
+            "cmd /c del /s build",
+        ] {
+            assert!(is_destructive_interactive_input(
+                input,
+                DangerousCommandPlatform::Windows
+            ));
+        }
+        assert!(!is_destructive_interactive_input(
+            "echo hello",
+            DangerousCommandPlatform::Posix
+        ));
     }
 
     #[test]

@@ -39,6 +39,8 @@ use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_shell_command::DangerousCommandPlatform;
+use codex_shell_command::is_destructive_interactive_input;
 use codex_tools::ToolName;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
@@ -160,6 +162,17 @@ pub(crate) enum ApprovalAction {
 pub(crate) enum ApprovalCacheKey {
     ExecCommand(UnifiedExecApprovalKey),
     ApplyPatch(ApplyPatchApprovalKey),
+}
+
+fn is_destructive_write_stdin_action(action: &ApprovalAction) -> bool {
+    let ApprovalAction::WriteStdin { input, cwd, .. } = action else {
+        return false;
+    };
+    let platform = match cwd.infer_path_convention() {
+        Some(PathConvention::Windows) => DangerousCommandPlatform::Windows,
+        _ => DangerousCommandPlatform::Posix,
+    };
+    is_destructive_interactive_input(input, platform)
 }
 
 impl ApprovalAction {
@@ -487,6 +500,32 @@ impl Session {
         {
             return Err(ToolError::Rejected(reason.to_string()));
         }
+        if is_destructive_write_stdin_action(&action) {
+            if matches!(policy, AskForApproval::Never)
+                || matches!(
+                    policy,
+                    AskForApproval::Granular(granular_config)
+                        if !granular_config.allows_sandbox_approval()
+                )
+            {
+                return Err(ToolError::Rejected(
+                    "destructive interactive stdin requires fresh human approval".to_string(),
+                ));
+            }
+            let decision = self.request_user_approval(&action, &ctx).await;
+            let decision = if decision == ReviewDecision::ApprovedForSession {
+                ReviewDecision::Approved
+            } else {
+                decision
+            };
+            let resolution = ApprovalResolution {
+                decision,
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
+
         let is_mcp_tool_call = matches!(&action, ApprovalAction::McpToolCall { .. });
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
         let permission_request_run_id = match &action {
@@ -569,6 +608,10 @@ impl Session {
         action: ApprovalAction,
         ctx: &ApprovalContext,
     ) -> Option<ReviewDecision> {
+        if is_destructive_write_stdin_action(&action) {
+            return None;
+        }
+
         let mut context = ctx.review_context.clone();
         if let ApprovalAction::McpToolCall {
             approval_policy,
