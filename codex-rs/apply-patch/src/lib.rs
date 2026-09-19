@@ -205,6 +205,25 @@ pub struct ApplyPatchAction {
 }
 
 impl ApplyPatchAction {
+/// Returns true when raw patch text contains a destructive filesystem mutation.
+/// Invalid patches return false because they are rejected by the normal parser.
+pub fn patch_is_destructive(patch: &str) -> bool {
+    let Ok(parsed) = parse_patch(patch) else {
+        return false;
+    };
+    parsed.hunks.iter().any(|hunk| {
+        matches!(
+            hunk,
+            Hunk::AddFile { .. }
+                | Hunk::DeleteFile { .. }
+                | Hunk::UpdateFile {
+                    move_path: Some(_),
+                    ..
+                }
+        )
+    })
+}
+
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
@@ -903,6 +922,22 @@ mod tests {
     /// Helper to construct a patch with the given body.
     fn wrap_patch(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    #[test]
+    fn raw_patch_destructive_predicate_covers_delete_add_and_move() {
+        assert!(patch_is_destructive(
+            "*** Begin Patch\n*** Delete File: a.txt\n*** End Patch"
+        ));
+        assert!(patch_is_destructive(
+            "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch"
+        ));
+        assert!(patch_is_destructive(
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** Move to: b.txt\n*** End Patch"
+        ));
+        assert!(!patch_is_destructive(
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+        ));
     }
 
     #[test]
