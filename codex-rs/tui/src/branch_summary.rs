@@ -225,11 +225,6 @@ async fn get_default_branch(
         {
             return Some(branch);
         }
-
-        if let Some(branch) = get_remote_default_branch_from_remote_show(runner, cwd, &remote).await
-        {
-            return Some(branch);
-        }
     }
 
     get_default_branch_local(runner, cwd).await
@@ -265,40 +260,7 @@ async fn get_remote_default_branch_from_symbolic_ref(
     })
 }
 
-/// Parses `git remote show` output to discover a remote's default branch ref.
-///
-/// This is a fallback for repositories where `refs/remotes/<remote>/HEAD` is not configured but
-/// `git remote show` can still report the upstream HEAD branch. The concrete remote-tracking ref
-/// must already exist locally before it is accepted.
-async fn get_remote_default_branch_from_remote_show(
-    runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
-    remote: &str,
-) -> Option<DefaultBranch> {
-    let output = run_git_command(runner, cwd, &["remote", "show", remote])
-        .await
-        .ok()?;
-    if !output.success() {
-        return None;
-    }
-
-    for line in output.stdout.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("HEAD branch:") else {
-            continue;
-        };
-        let name = rest.trim();
-        let remote_ref = format!("refs/remotes/{remote}/{name}");
-        if !name.is_empty() && git_ref_exists(runner, cwd, &remote_ref).await {
-            return Some(DefaultBranch {
-                merge_ref: remote_ref,
-            });
-        }
-    }
-
-    None
-}
-
+/// Falls back to local `main` or `master` when no remote default branch can be found.
 /// Falls back to local `main` or `master` when no remote default branch can be found.
 async fn get_default_branch_local(
     runner: &dyn WorkspaceCommandExecutor,
@@ -474,16 +436,20 @@ async fn run_git_command(
     cwd: &Path,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
-    let mut argv = Vec::with_capacity(args.len() + 3);
+    let mut argv = Vec::with_capacity(args.len() + 5);
     argv.push("git".to_string());
     argv.push("-c".to_string());
     argv.push(codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string());
+    argv.push("-c".to_string());
+    argv.push("core.sshCommand=".to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_ALLOW_PROTOCOL", "")
+                .env("GIT_NO_LAZY_FETCH", "1"),
         )
         .await
 }
@@ -570,6 +536,35 @@ mod tests {
         assert!(runner.saw(&["git", "merge-base", "HEAD", "refs/remotes/origin/main"]));
     }
 
+
+    #[tokio::test]
+    async fn default_branch_fallback_does_not_query_remote() {
+        let runner = FakeRunner::new(vec![
+            response(&["git", "remote"], /*exit_code*/ 0, "origin\n"),
+            response(
+                &["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                /*exit_code*/ 1,
+                "",
+            ),
+            response(
+                &["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"],
+                /*exit_code*/ 0,
+                "local-main-sha\n",
+            ),
+        ]);
+
+        let branch = get_default_branch(&runner, Path::new("/repo"))
+            .await
+            .expect("default branch");
+
+        assert_eq!(
+            branch,
+            DefaultBranch {
+                merge_ref: "refs/heads/main".to_string(),
+            }
+        );
+        assert!(!runner.saw(&["git", "remote", "show", "origin"]));
+    }
     #[tokio::test]
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
@@ -681,6 +676,8 @@ mod tests {
                 [
                     "-c".to_string(),
                     codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
                 ],
             );
         }
@@ -720,6 +717,8 @@ mod tests {
                     [
                         "-c".to_string(),
                         codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
                     ],
                 );
             }
