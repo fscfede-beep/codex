@@ -504,6 +504,7 @@ impl SandboxManager {
                     pending.native_sandbox_policy_cwd.as_path(),
                     use_legacy_landlock,
                     managed_network.as_ref(),
+                    self.allow_destructive_filesystem_effects,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
