@@ -1091,7 +1091,7 @@ mod tests {
         std::fs::write(
             &git,
             "#!/bin/sh\n\
-             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
+             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"core.sshCommand=\" ]; then shift 2; fi\n\
              printf '%s\\n' \"$*\" >>\"$0.log\"\n\
              case \"$1\" in\n\
              config) printf '/tmp/fsmonitor-helper\\000' ;;\n\
@@ -1133,7 +1133,7 @@ mod tests {
                 "config --null --get core.fsmonitor".to_string(),
                 "config --null --type=bool --fixed-value --get core.fsmonitor /tmp/fsmonitor-helper"
                     .to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=false status --porcelain"),
+                format!("-c {disabled_hooks} -c core.fsmonitor=false -c core.sshCommand= status --porcelain"),
             ]
         );
     }
@@ -1157,7 +1157,7 @@ mod tests {
         std::fs::write(
             &git,
             "#!/bin/sh\n\
-             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
+             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"core.sshCommand=\" ]; then shift 2; fi\n\
              printf '%s\\n' \"$*\" >>\"$0.log\"\n\
              case \"$1\" in\n\
              config)\n\
@@ -1221,7 +1221,7 @@ mod tests {
             vec![
                 "config --null --get core.fsmonitor".to_string(),
                 "version --build-options".to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=true status --porcelain"),
+                format!("-c {disabled_hooks} -c core.fsmonitor=true -c core.sshCommand= status --porcelain"),
             ]
         );
     }
