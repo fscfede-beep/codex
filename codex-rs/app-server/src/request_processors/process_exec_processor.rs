@@ -68,10 +68,19 @@ impl ProcessExecRequestProcessor {
 
     pub(crate) async fn process_spawn(
         &self,
-        request_id: ConnectionRequestId,
-        params: ProcessSpawnParams,
+        _request_id: ConnectionRequestId,
+        _params: ProcessSpawnParams,
     ) -> Result<(), JSONRPCErrorError> {
         self.require_local_environment()?;
+        // process/spawn is an experimental app-server surface that creates a host process
+        // directly via codex_utils_pty. It has no approval context, permission profile, or
+        // sandbox capability in its request, so allowing it to spawn here would bypass the
+        // governed ExecRequest/approval/sandbox chain used by Codex tool execution.
+        //
+        // Fail closed until this protocol is backed by the existing governed execution path.
+        Err(invalid_request(
+            "process/spawn is disabled because this RPC has no governed approval and sandbox authority",
+        ))
         let ProcessSpawnParams {
             command,
             process_handle,
