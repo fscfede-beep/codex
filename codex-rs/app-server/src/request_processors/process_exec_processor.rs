@@ -25,9 +25,7 @@ use codex_core::exec::ExecExpirationOutcome;
 use codex_core::exec::IO_DRAIN_TIMEOUT_MS;
 use codex_exec_server::EnvironmentManager;
 use codex_protocol::exec_output::bytes_to_string_smart;
-use codex_protocol::shell_environment::is_non_inheritable_env_var;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use codex_utils_pty::ProcessHandle;
 use codex_utils_pty::SpawnedProcess;
 use codex_utils_pty::TerminalSize;
@@ -35,7 +33,6 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
