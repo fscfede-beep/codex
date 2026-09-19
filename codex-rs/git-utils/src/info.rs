@@ -415,11 +415,14 @@ pub(crate) async fn run_git_command_with_timeout_from(
     let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
-        // Keep internal Git commands independent of repository-selected hooks
-        // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
+        // Keep internal Git commands independent of repository-selected hooks,
+        // fsmonitor helpers, and SSH commands while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
         .args(["-c", fsmonitor.git_config_arg()])
+        .args(["-c", "core.sshCommand="])
         .args(args)
         .current_dir(cwd);
     run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await
@@ -445,14 +448,15 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
 /// Attempt to determine the repository's default branch name.
 ///
 /// Preference order:
-/// 1) The symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
-/// 2) `git remote show <remote>` parsed for "HEAD branch: <name>"
-/// 3) Local fallback to existing `main` or `master` if present
+/// 1) The verified symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
+/// 2) Local fallback to existing `main` or `master` if present
+/// 
+/// Background metadata must remain local-only; no remote query is used to infer the default branch.
 async fn get_default_branch(cwd: &Path) -> Option<String> {
     // Prefer the first remote (with origin prioritized)
     let remotes = get_git_remotes(cwd).await.unwrap_or_default();
     for remote in remotes {
-        // Try symbolic-ref, which returns something like: refs/remotes/origin/main
+        // Resolve only the locally cached remote-tracking HEAD; never contact the remote.
         if let Some(symref_output) = run_git_command_with_timeout(
             &[
                 "symbolic-ref",
@@ -466,24 +470,17 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
             && let Ok(sym) = String::from_utf8(symref_output.stdout)
         {
             let trimmed = sym.trim();
-            if let Some((_, name)) = trimmed.rsplit_once('/') {
-                return Some(name.to_string());
-            }
-        }
-
-        // Fall back to parsing `git remote show <remote>` output
-        if let Some(show_output) =
-            run_git_command_with_timeout(&["remote", "show", &remote], cwd).await
-            && show_output.status.success()
-            && let Ok(text) = String::from_utf8(show_output.stdout)
-        {
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("HEAD branch:") {
-                    let name = rest.trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
+            let prefix = format!("refs/remotes/{remote}/");
+            if let Some(name) = trimmed.strip_prefix(&prefix) {
+                if !name.is_empty()
+                    && run_git_command_with_timeout(
+                        &["rev-parse", "--verify", "--quiet", trimmed],
+                        cwd,
+                    )
+                    .await
+                    .is_some_and(|output| output.status.success())
+                {
+                    return Some(name.to_string());
                 }
             }
         }
