@@ -388,7 +388,10 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         // worktree or index, so do not reduce the requested command's timeout.
         let mut command = Command::new(self.git);
         command
+            .env("GIT_ALLOW_PROTOCOL", "")
+            .env("GIT_NO_LAZY_FETCH", "1")
             .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+            .args(["-c", "core.sshCommand="])
             .args(args)
             .current_dir(self.cwd);
         match run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await {
@@ -415,11 +418,14 @@ pub(crate) async fn run_git_command_with_timeout_from(
     let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
         // Keep internal Git commands independent of repository-selected hooks
         // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
         .args(["-c", fsmonitor.git_config_arg()])
+        .args(["-c", "core.sshCommand="])
         .args(args)
         .current_dir(cwd);
     run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await
@@ -445,14 +451,12 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
 /// Attempt to determine the repository's default branch name.
 ///
 /// Preference order:
-/// 1) The symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
-/// 2) `git remote show <remote>` parsed for "HEAD branch: <name>"
-/// 3) Local fallback to existing `main` or `master` if present
+/// 1) A verified symbolic ref at `refs/remotes/<remote>/HEAD` for the first remote (origin prioritized)
+/// 2) Local fallback to existing `main` or `master` if present
 async fn get_default_branch(cwd: &Path) -> Option<String> {
     // Prefer the first remote (with origin prioritized)
     let remotes = get_git_remotes(cwd).await.unwrap_or_default();
     for remote in remotes {
-        // Try symbolic-ref, which returns something like: refs/remotes/origin/main
         if let Some(symref_output) = run_git_command_with_timeout(
             &[
                 "symbolic-ref",
@@ -466,25 +470,12 @@ async fn get_default_branch(cwd: &Path) -> Option<String> {
             && let Ok(sym) = String::from_utf8(symref_output.stdout)
         {
             let trimmed = sym.trim();
-            if let Some((_, name)) = trimmed.rsplit_once('/') {
-                return Some(name.to_string());
-            }
-        }
-
-        // Fall back to parsing `git remote show <remote>` output
-        if let Some(show_output) =
-            run_git_command_with_timeout(&["remote", "show", &remote], cwd).await
-            && show_output.status.success()
-            && let Ok(text) = String::from_utf8(show_output.stdout)
-        {
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("HEAD branch:") {
-                    let name = rest.trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
-                }
+            let prefix = format!("refs/remotes/{remote}/");
+            if trimmed.starts_with(&prefix) && git_ref_exists(cwd, trimmed).await {
+                return trimmed
+                    .strip_prefix(&prefix)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string);
             }
         }
     }
@@ -504,6 +495,15 @@ pub async fn default_branch_name(cwd: &Path) -> Option<String> {
 }
 
 /// Attempt to determine the repository's default branch name from local branches.
+async fn git_ref_exists(cwd: &Path, reference: &str) -> bool {
+    run_git_command_with_timeout(
+        &["rev-parse", "--verify", "--quiet", reference],
+        cwd,
+    )
+    .await
+    .is_some_and(|output| output.status.success())
+}
+
 async fn get_default_branch_local(cwd: &Path) -> Option<String> {
     for candidate in ["main", "master"] {
         if let Some(verify) = run_git_command_with_timeout(
@@ -924,6 +924,26 @@ mod tests {
         for remote in ["", "file:///tmp/repo", "github.com/openai", "/tmp/repo"] {
             assert_eq!(canonicalize_git_remote_url(remote), None);
         }
+    }
+
+    #[tokio::test]
+    async fn default_branch_fallback_never_queries_remote_show() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo directory");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize repo");
+        assert!(init.success());
+        std::fs::write(repo.join("README.md"), "ok\n").expect("write file");
+        assert!(std::process::Command::new("git").args(["add", "README.md"]).current_dir(&repo).status().expect("stage file").success());
+        assert!(std::process::Command::new("git").args([
+            "-c","user.name=Codex Test","-c","user.email=codex@example.com","commit","-qm","initial",
+        ]).current_dir(&repo).status().expect("commit file").success());
+        assert!(std::process::Command::new("git").args(["remote","add","origin","ssh://127.0.0.1:9/repo.git"]).current_dir(&repo).status().expect("add remote").success());
+        assert_eq!(get_default_branch(&repo).await.as_deref(), Some("main"));
     }
 
     /// Fetch remotes must be sanitized before they enter workspace metadata.
