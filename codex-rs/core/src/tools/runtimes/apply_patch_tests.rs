@@ -71,6 +71,43 @@ fn wants_no_sandbox_approval_granular_respects_sandbox_flag() {
     );
 }
 
+#[test]
+fn destructive_request_forces_governed_sandbox_and_narrows_profile() {
+    let runtime = ApplyPatchRuntime::new();
+    let path = std::env::temp_dir()
+        .join("apply-patch-v45-safety-test.txt")
+        .abs();
+    let path_uri = PathUri::from_abs_path(&path);
+    let req = ApplyPatchRequest {
+        turn_environment: test_turn_environment(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        action: ApplyPatchAction::new_add_for_test(&path_uri, "hello".to_string()),
+        file_paths: vec![path_uri.clone()],
+        changes: Arc::new(HashMap::new()),
+        exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+        additional_permissions: None,
+        permissions_preapproved: false,
+    };
+
+    assert_eq!(
+        runtime.sandbox_preference_for_attempt(&req, SandboxablePreference::Auto),
+        SandboxablePreference::Require
+    );
+    assert!(!runtime.escalate_on_failure_for_attempt(&req, true));
+
+    let narrowed = runtime.permission_profile_for_attempt(
+        &req,
+        &PermissionProfile::Disabled,
+        &[path_uri],
+    );
+    assert!(matches!(
+        narrowed,
+        PermissionProfile::Managed { .. }
+    ));
+}
+
 #[tokio::test]
 async fn approval_action_preserves_patch_path_uris() {
     let path = PathUri::parse("file:///C:/workspace/guardian-apply-patch-test.txt")
