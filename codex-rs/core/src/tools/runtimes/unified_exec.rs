@@ -250,6 +250,14 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         already_approved && is_destructive_filesystem_exec(req)
     }
 
+    fn allow_destructive_filesystem_effects(
+        &self,
+        req: &UnifiedExecRequest,
+        already_approved: bool,
+    ) -> bool {
+        already_approved && is_destructive_filesystem_exec(req)
+    }
+
     fn sandbox_permissions(&self, req: &UnifiedExecRequest) -> SandboxPermissions {
         if is_destructive_filesystem_exec(req) {
             SandboxPermissions::UseDefault
