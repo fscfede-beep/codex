@@ -162,6 +162,16 @@ pub(crate) enum ApprovalCacheKey {
     ApplyPatch(ApplyPatchApprovalKey),
 }
 
+fn is_destructive_apply_patch_action(action: &ApprovalAction) -> bool {
+    let ApprovalAction::ApplyPatch { changes, .. } = action else {
+        return false;
+    };
+    changes.values().any(|change| match change {
+        FileChange::Add { .. } | FileChange::Delete { .. } => true,
+        FileChange::Update { move_path, .. } => move_path.is_some(),
+    })
+}
+
 impl ApprovalAction {
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
@@ -487,6 +497,32 @@ impl Session {
         {
             return Err(ToolError::Rejected(reason.to_string()));
         }
+        if is_destructive_apply_patch_action(&action) {
+            if matches!(policy, AskForApproval::Never)
+                || matches!(
+                    policy,
+                    AskForApproval::Granular(granular_config)
+                        if !granular_config.allows_sandbox_approval()
+                )
+            {
+                return Err(ToolError::Rejected(
+                    "destructive apply_patch requires fresh human approval".to_string(),
+                ));
+            }
+            let decision = self.request_user_approval(&action, &ctx).await;
+            let decision = if decision == ReviewDecision::ApprovedForSession {
+                ReviewDecision::Approved
+            } else {
+                decision
+            };
+            let resolution = ApprovalResolution {
+                decision,
+                source: ApprovalResolutionSource::User,
+            };
+            record_resolution(&ctx, &resolution);
+            return resolution.into_tool_result(ctx.review_context.turn().model_info());
+        }
+
         let is_mcp_tool_call = matches!(&action, ApprovalAction::McpToolCall { .. });
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
         let permission_request_run_id = match &action {
@@ -569,6 +605,10 @@ impl Session {
         action: ApprovalAction,
         ctx: &ApprovalContext,
     ) -> Option<ReviewDecision> {
+        if is_destructive_apply_patch_action(&action) {
+            return None;
+        }
+
         let mut context = ctx.review_context.clone();
         if let ApprovalAction::McpToolCall {
             approval_policy,
@@ -790,6 +830,17 @@ impl Session {
                 permissions_preapproved,
                 ..
             } => {
+                if is_destructive_apply_patch_action(&action) {
+                    return self
+                        .request_patch_approval(
+                            ctx.review_context.turn(),
+                            ctx.call_id.clone(),
+                            changes.as_ref().clone(),
+                            Some("destructive apply_patch requires fresh human approval".to_string()),
+                            /*grant_root*/ None,
+                        )
+                        .await;
+                }
                 let reason = ctx
                     .retry_reason
                     .clone()
