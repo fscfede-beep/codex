@@ -588,3 +588,4 @@ fn destructive_patch_requires_workspace_root_even_with_disabled_profile() {
         }
     );
 }
+
