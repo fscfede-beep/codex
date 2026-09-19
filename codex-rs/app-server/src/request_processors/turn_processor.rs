@@ -809,11 +809,25 @@ impl TurnRequestProcessor {
         // `thread/settings/update` only acknowledges that the update was queued.
         // Clients that send dependent partial updates should wait for
         // `thread/settings/updated` or combine the fields in one request.
-        let snapshot = if permissions.is_some() {
+        // A snapshot is also required when a legacy sandbox override is supplied so
+        // a named permission profile cannot be widened implicitly through `sandboxPolicy`.
+        let snapshot = if permissions.is_some() || sandbox_policy.is_some() {
             Some(thread.config_snapshot().await)
         } else {
             None
         };
+
+        if sandbox_policy.is_some()
+            && permissions.is_none()
+            && snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.active_permission_profile.as_ref())
+                .is_some_and(|profile| !profile.id.starts_with(':'))
+        {
+            return Err(invalid_request(format!(
+                "{method} cannot override a named permission profile with `sandboxPolicy`; select the target permission profile explicitly"
+            )));
+        }
 
         let has_any_overrides = has_environment_override
             || disabled_plugin_ids.is_some()
