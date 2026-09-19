@@ -905,6 +905,60 @@ mod tests {
         format!("*** Begin Patch\n{body}\n*** End Patch")
     }
 
+    #[test]
+    fn destructive_action_predicate_covers_add_delete_and_move_but_not_plain_update() {
+        let add = ApplyPatchAction::new_add_for_test(
+            &PathUri::parse("file:///workspace/a.txt").expect("path"),
+            "new".to_string(),
+        );
+        assert!(add.is_destructive());
+
+        let delete = ApplyPatchAction {
+            changes: HashMap::from([(
+                PathUri::parse("file:///workspace/a.txt").expect("path"),
+                ApplyPatchFileChange::Delete {
+                    content: "old".to_string(),
+                },
+            )]),
+            update_file_mode: ApplyPatchFileUpdateMode::default(),
+            patch: "*** Begin Patch\n*** Delete File: a.txt\n*** End Patch".to_string(),
+            cwd: PathUri::parse("file:///workspace").expect("cwd"),
+        };
+        assert!(delete.is_destructive());
+
+        let move_update = ApplyPatchAction {
+            changes: HashMap::from([(
+                PathUri::parse("file:///workspace/a.txt").expect("path"),
+                ApplyPatchFileChange::Update {
+                    unified_diff: "@@\n-old\n+new".to_string(),
+                    move_path: Some(
+                        PathUri::parse("file:///workspace/b.txt").expect("dest"),
+                    ),
+                    new_content: "new".to_string(),
+                },
+            )]),
+            update_file_mode: ApplyPatchFileUpdateMode::default(),
+            patch: String::new(),
+            cwd: PathUri::parse("file:///workspace").expect("cwd"),
+        };
+        assert!(move_update.is_destructive());
+
+        let plain_update = ApplyPatchAction {
+            changes: HashMap::from([(
+                PathUri::parse("file:///workspace/a.txt").expect("path"),
+                ApplyPatchFileChange::Update {
+                    unified_diff: "@@\n-old\n+new".to_string(),
+                    move_path: None,
+                    new_content: "new".to_string(),
+                },
+            )]),
+            update_file_mode: ApplyPatchFileUpdateMode::default(),
+            patch: String::new(),
+            cwd: PathUri::parse("file:///workspace").expect("cwd"),
+        };
+        assert!(!plain_update.is_destructive());
+    }
+
     #[tokio::test]
     async fn test_add_file_hunk_creates_file_with_contents() {
         let dir = tempdir().unwrap();
