@@ -234,7 +234,6 @@ impl CommandExecManager {
             env,
             expiration,
             sandbox,
-            permission_profile,
             arg0,
             ..
         } = exec_request;
