@@ -100,8 +100,10 @@ where
 {
     let iterator = args.into_iter();
     let (lower, upper) = iterator.size_hint();
-    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 2);
-    // Keep internal Git helper commands independent of configured hook directories.
+    let mut args_vec = Vec::with_capacity(upper.unwrap_or(lower) + 4);
+    // Keep internal Git helper commands independent of configured hook directories and SSH commands.
+    args_vec.push(OsString::from("-c"));
+    args_vec.push(OsString::from("core.sshCommand="));
     args_vec.push(OsString::from("-c"));
     args_vec.push(OsString::from(format!(
         "core.hooksPath={DISABLED_HOOKS_PATH}"
