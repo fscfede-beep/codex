@@ -46,6 +46,26 @@ pub fn run_main() -> i32 {
         return 2;
     }
 
+    // This entrypoint has no governed approval or sandbox context. Destructive
+    // patches therefore fail closed rather than acquiring ambient host authority.
+    if matches!(
+        crate::parser::parse_patch(&patch_arg),
+        Ok(source) if source.hunks.iter().any(|hunk| {
+            matches!(
+                hunk,
+                crate::parser::Hunk::AddFile { .. }
+                    | crate::parser::Hunk::DeleteFile { .. }
+                    | crate::parser::Hunk::UpdateFile {
+                        move_path: Some(_),
+                        ..
+                    }
+            )
+        })
+    ) {
+        eprintln!("Error: destructive apply_patch requires governed approval and sandbox execution.");
+        return 1;
+    }
+
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
