@@ -145,7 +145,7 @@ async fn command_exec_rejects_sandboxed_direct_pty_backend() -> Result<()> {
         error
             .error
             .message
-            .contains("command/exec cannot use the direct PTY backend without explicit full-access authority")
+            .contains("command/exec direct PTY backend does not support governed sandbox execution")
     );
     assert!(!probe.exists());
     Ok(())
