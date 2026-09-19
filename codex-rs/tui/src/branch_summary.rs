@@ -261,7 +261,7 @@ async fn get_remote_default_branch_from_symbolic_ref(
     })
 }
 
-tui remote fn/// Falls back to local `main` or `master` when no remote default branch can be found.
+/// Falls back to local `main` or `master` when no remote default branch can be found.
 async fn get_default_branch_local(
     runner: &dyn WorkspaceCommandExecutor,
     cwd: &Path,
