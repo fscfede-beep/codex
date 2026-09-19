@@ -1442,7 +1442,10 @@ mod tests {
                 None,
             )
             .await;
-        assert_eq!(result.map_err(|err| err.kind()), Err(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            result.map_err(|err| err.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
         assert_eq!(std::fs::read_to_string(&target)?, "protected");
         Ok(())
     }
