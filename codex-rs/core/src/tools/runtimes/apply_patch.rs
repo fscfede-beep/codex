@@ -164,6 +164,24 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 }
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
+    fn permission_profile_for_attempt(
+        &self,
+        req: &ApplyPatchRequest,
+        base: &PermissionProfile,
+        workspace_roots: &[PathUri],
+    ) -> PermissionProfile {
+        if req.action.is_destructive() {
+            PermissionProfile::workspace_write_with_path_uris(
+                workspace_roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+        } else {
+            base.clone()
+        }
+    }
+
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
         &req.turn_environment
     }
