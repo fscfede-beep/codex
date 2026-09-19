@@ -115,54 +115,10 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
         codex_windows_sandbox::run_windows_sandbox_wrapper_main();
     }
     if argv1 == CODEX_CORE_APPLY_PATCH_ARG1 {
-        // This hidden self-dispatch path has no governed approval or sandbox context.
-        // Refuse it rather than allowing an agent-controlled process to mutate the host.
         eprintln!(
             "Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a governed Codex runtime; standalone internal dispatch is disabled."
         );
         std::process::exit(1);
-        /*
-        let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
-        let exit_code = match patch_arg {
-            Some(patch_arg) => {
-                let mut stdout = std::io::stdout();
-                let mut stderr = std::io::stderr();
-                let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
-                    Ok(cwd) => cwd,
-                    Err(_) => std::process::exit(1),
-                };
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => std::process::exit(1),
-                };
-                let cwd = cwd.into();
-                let update_file_mode = codex_apply_patch::apply_patch_file_update_mode_from_env();
-                match runtime.block_on(codex_apply_patch::apply_patch_with_options(
-                    &patch_arg,
-                    codex_apply_patch::ApplyPatchOptions {
-                        update_file_mode,
-                        ..Default::default()
-                    },
-                    &cwd,
-                    &mut stdout,
-                    &mut stderr,
-                    codex_exec_server::LOCAL_FS.as_ref(),
-                    /*sandbox*/ None,
-                )) {
-                    Ok(_) => 0,
-                    Err(_) => 1,
-                }
-            }
-            None => {
-                eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
-                1
-            }
-        };
-        std::process::exit(exit_code);
-        */
     }
 
     // This modifies the environment, which is not thread-safe, so do this
