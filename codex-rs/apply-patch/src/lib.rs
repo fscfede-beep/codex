@@ -14,8 +14,8 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
-use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::FileSystemObjectIdentity;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
@@ -668,24 +668,34 @@ pub async fn apply_patch_with_destructive_targets(
                         .map_err(ApplyPatchError::from)
                         .map_err(ApplyPatchFailure::without_delta)?;
                 }
-                InvalidHunkError { message, line_number } => {
-                    writeln!(stderr, "Invalid patch hunk on line {line_number}: {message}")
-                        .map_err(ApplyPatchError::from)
-                        .map_err(ApplyPatchFailure::without_delta)?;
+                InvalidHunkError {
+                    message,
+                    line_number,
+                } => {
+                    writeln!(
+                        stderr,
+                        "Invalid patch hunk on line {line_number}: {message}"
+                    )
+                    .map_err(ApplyPatchError::from)
+                    .map_err(ApplyPatchFailure::without_delta)?;
                 }
             }
-            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::ParseError(e)));
+            return Err(ApplyPatchFailure::without_delta(
+                ApplyPatchError::ParseError(e),
+            ));
         }
     };
     if hunks.iter().any(hunk_is_destructive) {
         if destructive_targets.is_empty() {
-            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
-                context: "destructive apply_patch authorization".to_string(),
-                source: io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "destructive apply_patch requires verified object-identity preconditions",
-                ),
-            })));
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(
+                IoError {
+                    context: "destructive apply_patch authorization".to_string(),
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "destructive apply_patch requires verified object-identity preconditions",
+                    ),
+                },
+            )));
         }
 
         // This API is a hard execution boundary too: a caller cannot pass approved
@@ -696,13 +706,15 @@ pub async fn apply_patch_with_destructive_targets(
         };
         let sandbox = scoped_sandbox.as_ref().or(sandbox);
         if sandbox.is_none() {
-            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(IoError {
-                context: "destructive apply_patch sandbox".to_string(),
-                source: io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "destructive apply_patch requires an enforceable scoped filesystem sandbox",
-                ),
-            })));
+            return Err(ApplyPatchFailure::without_delta(ApplyPatchError::IoError(
+                IoError {
+                    context: "destructive apply_patch sandbox".to_string(),
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "destructive apply_patch requires an enforceable scoped filesystem sandbox",
+                    ),
+                },
+            )));
         }
 
         return apply_hunks_with_options_and_destructive_targets(
@@ -1056,7 +1068,8 @@ async fn apply_hunks_to_files(
                         .await
                     );
                     let dest_write_change_index = delta.changes.len();
-                    let source_target = destructive_target_for_path(destructive_targets, &path_uri)?;
+                    let source_target =
+                        destructive_target_for_path(destructive_targets, &path_uri)?;
                     revalidate_destructive_target(source_target, fs, sandbox).await?;
                     delta.changes.push(AppliedPatchChange {
                         path: dest_uri.clone(),
@@ -1958,7 +1971,10 @@ mod tests {
         .expect_err("target appearance must invalidate destructive authorization");
 
         assert!(format!("{err}").contains("target appeared after authorization"));
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "attacker content");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "attacker content"
+        );
     }
 
     #[tokio::test]
@@ -1985,5 +2001,4 @@ mod tests {
         }
         assert!(!nested.exists());
     }
-
 }
