@@ -65,6 +65,12 @@ impl WorkspaceCommand {
     /// Creates a Git command that is restricted to already-local repository data.
     pub(crate) fn local_only_git(argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let mut command = Self::new(argv);
+        if command.argv.first().map(String::as_str) == Some("git") {
+            command.argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
         for (key, value) in codex_git_utils::local_only_git_env() {
             command = command.env(key, value);
         }
@@ -220,5 +226,27 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
                 stderr: response.stderr,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceCommand;
+
+    #[test]
+    fn local_only_git_overrides_repository_ssh_command() {
+        let command = WorkspaceCommand::local_only_git(["git", "status"]);
+        assert_eq!(
+            command.argv,
+            vec!["git", "-c", "core.sshCommand=", "status"]
+        );
+        assert_eq!(
+            command.env.get("GIT_ALLOW_PROTOCOL"),
+            Some(&Some(String::new()))
+        );
+        assert_eq!(
+            command.env.get("GIT_NO_LAZY_FETCH"),
+            Some(&Some("1".to_string()))
+        );
     }
 }
