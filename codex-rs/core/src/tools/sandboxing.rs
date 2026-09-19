@@ -364,6 +364,17 @@ pub(crate) enum ToolError {
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
+    /// Allows a runtime to make sandbox selection depend on the concrete request.
+    /// Ordinary tools retain the static sandbox-preference behavior.
+    fn sandbox_preference_for_request(&self, _req: &Req) -> SandboxablePreference {
+        self.sandbox_preference()
+    }
+
+    /// Allows a runtime to disable sandbox-to-unsandboxed retry for a concrete request.
+    fn escalate_on_failure_for_request(&self, _req: &Req) -> bool {
+        self.escalate_on_failure()
+    }
+
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
         false
     }
