@@ -147,6 +147,10 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    /// Internal: permit filesystem deletion for trusted filesystem-helper launches.
+    #[arg(long = "allow-destructive-filesystem-effects", hide = true, default_value_t = false)]
+    pub allow_destructive_filesystem_effects: bool,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -170,6 +174,7 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
+        allow_destructive_filesystem_effects,
         command,
     } = LandlockCommand::parse();
     let allow_network_for_proxy = managed_network.is_some();
@@ -234,6 +239,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             proxy_routing_active,
+            !allow_destructive_filesystem_effects,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -280,6 +286,7 @@ pub fn run_main() -> ! {
             /*apply_landlock_fs*/ false,
             managed_network.as_ref(),
             /*proxy_routing_active*/ false,
+            !allow_destructive_filesystem_effects,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
@@ -329,6 +336,7 @@ pub fn run_main() -> ! {
             managed_network,
             proxy_route_spec,
             command,
+            allow_destructive_filesystem_effects,
         });
         run_bwrap_with_proc_fallback(
             &sandbox_policy_cwd,
@@ -1517,6 +1525,7 @@ struct InnerSeccompCommandArgs<'a> {
     managed_network: Option<ManagedNetworkSandboxContext>,
     proxy_route_spec: Option<String>,
     command: Vec<String>,
+    allow_destructive_filesystem_effects: bool,
 }
 
 /// Build the inner command that applies seccomp after bubblewrap.
@@ -1528,6 +1537,7 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         managed_network,
         proxy_route_spec,
         command,
+        allow_destructive_filesystem_effects,
     } = args;
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
