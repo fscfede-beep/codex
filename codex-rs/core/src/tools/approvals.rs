@@ -162,6 +162,26 @@ pub(crate) enum ApprovalCacheKey {
     ApplyPatch(ApplyPatchApprovalKey),
 }
 
+fn is_destructive_apply_patch_action(action: &ApprovalAction) -> bool {
+    matches!(
+        action,
+        ApprovalAction::ApplyPatch { changes, .. }
+            if changes.values().any(|change| matches!(
+                change,
+                FileChange::Add { .. }
+                    | FileChange::Delete { .. }
+                    | FileChange::Update { move_path: Some(_), .. }
+            ))
+    )
+}
+
+fn normalize_destructive_review_decision(decision: ReviewDecision) -> ReviewDecision {
+    match decision {
+        ReviewDecision::ApprovedForSession => ReviewDecision::Approved,
+        other => other,
+    }
+}
+
 impl ApprovalAction {
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
