@@ -49,7 +49,9 @@ fn windows_patch_matching_is_uri_native() {
             &context,
             PatchSandboxRoute::ExecutorManaged,
         ),
-        SafetyCheck::AutoApprove,
+        SafetyCheck::Reject {
+            reason: "destructive apply_patch requires a fresh human approval".to_string(),
+        },
     );
 }
 
@@ -89,11 +91,7 @@ fn full_disk_write_uses_executor_path_convention() {
                 &context,
                 PatchSandboxRoute::ExecutorManaged,
             ),
-            if full_disk_write {
-                SafetyCheck::AutoApprove
-            } else {
-                SafetyCheck::AskUser
-            },
+            SafetyCheck::AskUser,
         );
 
         // Literal aliases can override equally specific read grants, but never denies.
@@ -168,7 +166,7 @@ fn test_writable_roots_constraint() {
 }
 
 #[test]
-fn external_sandbox_auto_approves_in_on_request() {
+fn external_sandbox_rejects_destructive_on_request_without_enforcement() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().abs();
     let cwd_uri = PathUri::from_abs_path(&cwd);
@@ -192,7 +190,9 @@ fn external_sandbox_auto_approves_in_on_request() {
             &local_context(&cwd_uri),
             PatchSandboxRoute::Platform(WindowsSandboxLevel::Disabled)
         ),
-        SafetyCheck::AutoApprove
+        SafetyCheck::Reject {
+            reason: "destructive apply_patch requires an enforceable sandbox".to_string(),
+        }
     );
 }
 

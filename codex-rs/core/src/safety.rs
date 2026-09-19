@@ -56,6 +56,29 @@ pub fn assess_patch_safety(
             policy,
             AskForApproval::Granular(granular_config) if !granular_config.sandbox_approval
         );
+
+    if action.is_destructive() {
+        if rejects_sandbox_approval {
+            return SafetyCheck::Reject {
+                reason: "destructive apply_patch requires a fresh human approval".to_string(),
+            };
+        }
+        let sandbox_available = match sandbox_route {
+            PatchSandboxRoute::ExecutorManaged => true,
+            PatchSandboxRoute::Platform(windows_sandbox_level) => {
+                get_platform_sandbox(windows_sandbox_level != WindowsSandboxLevel::Disabled)
+                    .is_some()
+            }
+        };
+        return if sandbox_available {
+            SafetyCheck::AskUser
+        } else {
+            SafetyCheck::Reject {
+                reason: "destructive apply_patch requires an enforceable sandbox".to_string(),
+            }
+        };
+    }
+
     let sandbox_available = match sandbox_route {
         PatchSandboxRoute::ExecutorManaged => true,
         PatchSandboxRoute::Platform(windows_sandbox_level) => {

@@ -204,6 +204,31 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRuntime<'a> {
+    fn sandbox_preference_for_attempt(
+        &self,
+        req: &UnifiedExecRequest,
+        base: SandboxablePreference,
+    ) -> SandboxablePreference {
+        let policy = req.turn_environment.permission_profile().file_system_sandbox_policy();
+        if policy.has_full_disk_write_access() {
+            SandboxablePreference::Require
+        } else {
+            base
+        }
+    }
+
+    fn escalate_on_failure_for_attempt(
+        &self,
+        req: &UnifiedExecRequest,
+        base: bool,
+    ) -> bool {
+        if req.turn_environment.permission_profile().file_system_sandbox_policy().has_full_disk_write_access() {
+            false
+        } else {
+            base
+        }
+    }
+
     fn turn_environment<'b>(&self, req: &'b UnifiedExecRequest) -> &'b TurnEnvironment {
         &req.turn_environment
     }
