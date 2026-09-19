@@ -418,6 +418,7 @@ pub fn build_exec_request(
             },
             use_legacy_landlock,
             windows_sandbox_level,
+            allow_destructive_filesystem_effects: false,
         })
         .map_err(CodexErr::from)?;
     // These hints belong to the native Windows backend. Other backends use
@@ -1198,79 +1199,3 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
 ) -> io::Result<StreamOutput<Vec<u8>>> {
     let mut buf = Vec::with_capacity(
         max_bytes.map_or(AGGREGATE_BUFFER_INITIAL_CAPACITY, |max_bytes| {
-            AGGREGATE_BUFFER_INITIAL_CAPACITY.min(max_bytes)
-        }),
-    );
-    let mut tmp = [0u8; READ_CHUNK_SIZE];
-    let mut emitted_deltas: usize = 0;
-
-    loop {
-        let n = reader.read(&mut tmp).await?;
-        if n == 0 {
-            break;
-        }
-
-        if let Some(stream) = &stream
-            && emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL
-        {
-            let chunk = tmp[..n].to_vec();
-            let msg = EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
-                call_id: stream.call_id.clone(),
-                stream: if is_stderr {
-                    ExecOutputStream::Stderr
-                } else {
-                    ExecOutputStream::Stdout
-                },
-                chunk,
-            });
-            let event = Event {
-                id: stream.sub_id.clone(),
-                msg,
-            };
-            #[allow(clippy::let_unit_value)]
-            let _ = stream.tx_event.send(event).await;
-            emitted_deltas += 1;
-        }
-
-        if let Some(max_bytes) = max_bytes {
-            append_capped(&mut buf, &tmp[..n], max_bytes);
-        } else {
-            buf.extend_from_slice(&tmp[..n]);
-        }
-        // Continue reading to EOF to avoid back-pressure
-    }
-
-    Ok(StreamOutput {
-        text: buf,
-        truncated_after_lines: None,
-    })
-}
-
-#[cfg(unix)]
-fn synthetic_exit_status(code: i32) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(code)
-}
-
-#[cfg(unix)]
-fn synthetic_exit_status_for_code(code: i32) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(code << 8)
-}
-
-#[cfg(windows)]
-fn synthetic_exit_status(code: i32) -> ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    // On Windows the raw status is a u32. Use a direct cast to avoid
-    // panicking on negative i32 values produced by prior narrowing casts.
-    std::process::ExitStatus::from_raw(code as u32)
-}
-
-#[cfg(windows)]
-fn synthetic_exit_status_for_code(code: i32) -> ExitStatus {
-    synthetic_exit_status(code)
-}
-
-#[cfg(test)]
-#[path = "exec_tests.rs"]
-mod tests;
