@@ -169,6 +169,14 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
     ) -> bool {
         already_approved && req.action.is_destructive()
     }
+
+    fn allow_destructive_filesystem_effects(
+        &self,
+        req: &ApplyPatchRequest,
+        already_approved: bool,
+    ) -> bool {
+        already_approved && req.action.is_destructive()
+    }
 }
 
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
