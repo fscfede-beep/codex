@@ -1214,3 +1214,247 @@ mod tests {
         let stderr_str = String::from_utf8(stderr).unwrap();
         let expected_out = format!(
             "Success. Updated the following files:\nM {}\n",
+            path.display()
+        );
+        assert_eq!(stdout_str, expected_out);
+        assert_eq!(stderr_str, "");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "foo\nBAR\nbaz\nQUX\n");
+    }
+
+    /// A more involved `Update File` hunk that exercises additions, deletions and
+    /// replacements in separate chunks that appear in non‑adjacent parts of the
+    /// file.  Verifies that all edits are applied and that the summary lists the
+    /// file only once.
+    #[tokio::test]
+    async fn test_update_file_hunk_interleaved_changes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interleaved.txt");
+
+        // Original file: six numbered lines.
+        fs::write(&path, "a\nb\nc\nd\ne\nf\n").unwrap();
+
+        // Patch performs:
+        //  • Replace `b` → `B`
+        //  • Replace `e` → `E` (using surrounding context)
+        //  • Append new line `g` at the end‑of‑file
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@
+ a
+-b
++B
+@@
+ c
+ d
+-e
++E
+@@
+ f
++g
+*** End of File"#,
+            path.display()
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(
+            &patch,
+            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .unwrap();
+
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        let stderr_str = String::from_utf8(stderr).unwrap();
+
+        let expected_out = format!(
+            "Success. Updated the following files:\nM {}\n",
+            path.display()
+        );
+        assert_eq!(stdout_str, expected_out);
+        assert_eq!(stderr_str, "");
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "a\nB\nc\nd\nE\nf\ng\n");
+    }
+
+    #[tokio::test]
+    async fn test_pure_addition_chunk_followed_by_removal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("panic.txt");
+        fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@
++after-context
++second-line
+@@
+ line1
+-line2
+-line3
++line2-replacement"#,
+            path.display()
+        ));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(
+            &patch,
+            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .unwrap();
+        let contents = fs::read_to_string(path).unwrap();
+        assert_eq!(
+            contents,
+            "line1\nline2-replacement\nafter-context\nsecond-line\n"
+        );
+    }
+
+    /// Ensure that patches authored with ASCII characters can update lines that
+    /// contain typographic Unicode punctuation (e.g. EN DASH, NON-BREAKING
+    /// HYPHEN). Historically `git apply` succeeds in such scenarios but our
+    /// internal matcher failed requiring an exact byte-for-byte match.  The
+    /// fuzzy-matching pass that normalises common punctuation should now bridge
+    /// the gap.
+    #[tokio::test]
+    async fn test_update_line_with_unicode_dash() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unicode.py");
+
+        // Original line contains EN DASH (\u{2013}) and NON-BREAKING HYPHEN (\u{2011}).
+        let original = "import asyncio  # local import \u{2013} avoids top\u{2011}level dep\n";
+        std::fs::write(&path, original).unwrap();
+
+        // Patch uses plain ASCII dash / hyphen.
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@
+-import asyncio  # local import - avoids top-level dep
++import asyncio  # HELLO"#,
+            path.display()
+        ));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(
+            &patch,
+            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .unwrap();
+
+        // File should now contain the replaced comment.
+        let expected = "import asyncio  # HELLO\n";
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, expected);
+
+        // Ensure success summary lists the file as modified.
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        let expected_out = format!(
+            "Success. Updated the following files:\nM {}\n",
+            path.display()
+        );
+        assert_eq!(stdout_str, expected_out);
+
+        // No stderr expected.
+        assert_eq!(String::from_utf8(stderr).unwrap(), "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_apply_patch_fails_on_write_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let locked_dir = dir.path().join("locked");
+        fs::create_dir(&locked_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let patch = wrap_patch("*** Add File: locked/new.txt\n+after");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = apply_patch(
+            &patch,
+            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await;
+        let failure = result.expect_err("write should fail");
+
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!failure.delta().is_exact());
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_destinations_return_inexact_delta() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("binary.dat");
+        fs::write(dir.path().join("source.txt"), "before\n").unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute test path");
+
+        for patch in [
+            wrap_patch("*** Add File: binary.dat\n+text"),
+            wrap_patch("*** Update File: source.txt\n*** Move to: binary.dat\n@@\n-before\n+after"),
+        ] {
+            fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let delta = apply_patch(
+                &patch,
+                &cwd,
+                &mut stdout,
+                &mut stderr,
+                LOCAL_FS.as_ref(),
+                /*sandbox*/ None,
+            )
+            .await
+            .unwrap();
+
+            assert!(!delta.is_exact());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_delete_symlink_returns_inexact_delta() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("target.txt"), "target\n").unwrap();
+        symlink(dir.path().join("target.txt"), dir.path().join("link.txt")).unwrap();
+        let patch = wrap_patch("*** Delete File: link.txt");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let delta = apply_patch(
+            &patch,
+            &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!delta.is_exact());
+    }
+}
