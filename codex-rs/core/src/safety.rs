@@ -40,6 +40,33 @@ pub fn assess_patch_safety(
         };
     }
 
+    // Destructive patch effects must never be auto-approved, even when the ambient
+    // filesystem policy is full-disk or otherwise writable. They require the same
+    // fresh approval path used for other destructive actions.
+    if action.changes().values().any(|change| {
+        matches!(
+            change,
+            ApplyPatchFileChange::Add { .. }
+                | ApplyPatchFileChange::Delete { .. }
+                | ApplyPatchFileChange::Update {
+                    move_path: Some(_),
+                    ..
+                }
+        )
+    }) {
+        return if matches!(policy, AskForApproval::Never)
+            || matches!(
+                policy,
+                AskForApproval::Granular(granular_config) if !granular_config.sandbox_approval
+            ) {
+            SafetyCheck::Reject {
+                reason: "destructive apply_patch requires fresh human approval".to_string(),
+            }
+        } else {
+            SafetyCheck::AskUser
+        };
+    }
+
     match policy {
         AskForApproval::Never | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
             // Continue to see if this can be auto-approved.
