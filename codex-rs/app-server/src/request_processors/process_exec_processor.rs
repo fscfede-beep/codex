@@ -68,10 +68,15 @@ impl ProcessExecRequestProcessor {
 
     pub(crate) async fn process_spawn(
         &self,
-        request_id: ConnectionRequestId,
-        params: ProcessSpawnParams,
+        _request_id: ConnectionRequestId,
+        _params: ProcessSpawnParams,
     ) -> Result<(), JSONRPCErrorError> {
         self.require_local_environment()?;
+        Err(invalid_request(
+            "process/spawn is disabled: it has no governed sandbox capability",
+        ))?;
+        #[allow(unreachable_code)]
+        {
         let ProcessSpawnParams {
             command,
             process_handle,
