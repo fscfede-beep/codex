@@ -445,7 +445,11 @@ async fn run_git_command(
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                // Background Git metadata must not honor a repository-controlled SSH command.
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "core.sshCommand")
+                .env("GIT_CONFIG_VALUE_0", ""),
         )
         .await
 }
