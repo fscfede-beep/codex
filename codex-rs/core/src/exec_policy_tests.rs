@@ -684,7 +684,7 @@ async fn complex_shell_script_honors_restrictive_inner_rule() {
     let command = vec![
         "zsh".to_string(),
         "-lc".to_string(),
-        "set -e; target=/tmp/work; if test -e \\"$target\\"; then rm -- \\"$target\\"; fi".to_string(),
+        r#"set -e; target=/tmp/work; if test -e "$target"; then rm -- "$target"; fi"#.to_string(),
     ];
 
     let requirement = exec_approval_requirement_for_command(ExecApprovalRequirementScenario {
@@ -747,7 +747,7 @@ async fn complex_shell_does_not_gain_allow_from_literal_extraction() {
         policy_src: Some(
             r#"prefix_rule(pattern=["rm"], decision="allow")"#.to_string(),
         ),
-        command.clone(),
+        command: command.clone(),
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::read_only(),
         sandbox_permissions: SandboxPermissions::UseDefault,
