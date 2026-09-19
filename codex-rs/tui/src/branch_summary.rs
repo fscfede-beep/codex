@@ -885,7 +885,12 @@ mod tests {
         if argv.first().map(String::as_str) == Some("git") {
             argv.splice(
                 1..1,
-                ["-c".to_string(), "core.sshCommand=".to_string()],
+                [
+                    "-c".to_string(),
+                    codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
+                ],
             );
         }
         argv
