@@ -540,24 +540,13 @@ mod tests {
     #[tokio::test]
     async fn default_branch_fallback_does_not_query_remote() {
         let runner = FakeRunner::new(vec![
-            response(
-                &["git", "remote"],
-                /*exit_code*/ 0,
-                "origin\n",
-            ),
+            response(&["git", "remote"], /*exit_code*/ 0, "origin\n"),
             response(
                 &["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
                 /*exit_code*/ 1,
                 "",
             ),
-            response(
-                &[
-                    "git",
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    "refs/heads/main",
-                ],
+            response(&["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"],
                 /*exit_code*/ 0,
                 "local-main-sha\n",
             ),
