@@ -475,6 +475,18 @@ impl SessionConfiguration {
                 next_configuration.original_config_do_not_use = Arc::new(config);
             }
         } else if let Some(sandbox_policy) = updates.sandbox_policy.clone() {
+            if self
+                .active_permission_profile()
+                .as_ref()
+                .is_some_and(|profile| !profile.id.starts_with(':'))
+            {
+                return Err(ConstraintError::InvalidValue {
+                    field_name: "sandbox_policy",
+                    candidate: format!("{sandbox_policy:?}"),
+                    allowed: "an explicit named permission profile selection is required when a named profile is active".to_string(),
+                    requirement_source: codex_config::RequirementSource::Unknown,
+                });
+            }
             let file_system_sandbox_policy =
                 FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
                     &sandbox_policy,
