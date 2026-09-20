@@ -168,6 +168,7 @@ fn run_git(cwd: &Path, git_cfg: &[String], args: &[String]) -> io::Result<(i32, 
 fn local_git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command.envs(crate::local_only_git_env());
+    command.args(["-c", "core.sshCommand="]);
     command
 }
 
