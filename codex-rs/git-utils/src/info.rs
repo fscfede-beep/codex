@@ -426,6 +426,7 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         let mut command = Command::new(self.git);
         command
             .envs(crate::local_only_git_env())
+            .args(["-c", "core.sshCommand="])
             .args(args)
             .current_dir(self.cwd)
             .kill_on_drop(true);
@@ -1029,6 +1030,63 @@ mod tests {
             (diff, helper.with_extension("sh.ran").exists()),
             (None, false),
             "local-only diff must fail without invoking the promisor transport"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn local_git_metadata_does_not_execute_repository_ssh_command() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize test repository");
+        assert!(status.success(), "initialize test repository");
+
+        let marker = temp_dir.path().join("ssh-marker.txt");
+        let canary = temp_dir.path().join("ssh-canary.cmd");
+        std::fs::write(
+            &canary,
+            format!(
+                "@echo off\r\necho CODEX_GITUTILS_SSH_CANARY>>\"{}\"\r\nexit /b 0\r\n",
+                marker.display()
+            ),
+        )
+        .expect("write SSH canary");
+
+        let status = std::process::Command::new("git")
+            .args(["config", "core.sshCommand", canary.to_str().expect("canary path")])
+            .current_dir(&repo)
+            .status()
+            .expect("configure repository SSH command");
+        assert!(status.success(), "configure repository SSH command");
+
+        let status = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "ssh://127.0.0.1:9/example/repo.git",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("configure SSH remote");
+        assert!(status.success(), "configure SSH remote");
+
+        let output = run_git_command_with_timeout_from(
+            Path::new("git"),
+            &["remote", "show", "origin"],
+            &repo,
+            crate::FsmonitorOverride::Disabled,
+        )
+        .await;
+        assert!(output.is_some(), "Git command should return a bounded result");
+        assert!(
+            !marker.exists(),
+            "local-only Git metadata must not execute repository-controlled core.sshCommand"
         );
     }
 
