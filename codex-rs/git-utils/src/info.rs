@@ -1099,7 +1099,9 @@ mod tests {
                 "config --null --get core.fsmonitor".to_string(),
                 "config --null --type=bool --fixed-value --get core.fsmonitor /tmp/fsmonitor-helper"
                     .to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=false status --porcelain"),
+                format!(
+                    "-c {disabled_hooks} -c core.fsmonitor=false -c core.sshCommand= status --porcelain"
+                ),
             ]
         );
     }
@@ -1187,7 +1189,9 @@ mod tests {
             vec![
                 "config --null --get core.fsmonitor".to_string(),
                 "version --build-options".to_string(),
-                format!("-c {disabled_hooks} -c core.fsmonitor=true status --porcelain"),
+                format!(
+                    "-c {disabled_hooks} -c core.fsmonitor=true -c core.sshCommand= status --porcelain"
+                ),
             ]
         );
     }
