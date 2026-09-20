@@ -834,6 +834,88 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_git_metadata_blocks_repository_ssh_command_execution() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path();
+
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .expect("initialize test repository");
+        assert!(status.success(), "initialize test repository");
+
+        let status = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "ssh://127.0.0.1:9/repo.git",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("configure SSH remote");
+        assert!(status.success(), "configure SSH remote");
+
+        let marker = temp_dir.path().join("ssh-canary.marker");
+        let helper = temp_dir.path().join("ssh-canary.sh");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf 'CODEX_SSH_CANARY_EXECUTED\\n' >> '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .expect("write SSH canary");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("read SSH canary metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make SSH canary executable");
+
+        let status = std::process::Command::new("git")
+            .args([
+                "config",
+                "core.sshCommand",
+                helper.to_str().expect("SSH canary path"),
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("configure repository SSH command");
+        assert!(status.success(), "configure repository SSH command");
+
+        let raw = Command::new("git")
+            .args(["remote", "show", "origin"])
+            .current_dir(repo)
+            .output()
+            .await
+            .expect("run vulnerable Git metadata command");
+        assert_eq!(raw.status.success(), false);
+        assert!(
+            marker.exists(),
+            "control run must execute the configured SSH canary"
+        );
+
+        std::fs::remove_file(&marker).expect("reset SSH canary marker");
+
+        let hardened = run_git_command_with_timeout_from(
+            Path::new("git"),
+            &["remote", "show", "origin"],
+            repo,
+            crate::FsmonitorOverride::Disabled,
+        )
+        .await
+        .expect("run hardened Git metadata command");
+
+        assert_eq!(hardened.status.success(), false);
+        assert!(
+            !marker.exists(),
+            "local-only Git metadata must not execute repository core.sshCommand"
+        );
+    }
+
     #[tokio::test]
     async fn git_metadata_commands_do_not_inherit_stdin() {
         const CHILD_ENV: &str = "CODEX_GIT_UTILS_STDIN_CHILD";
