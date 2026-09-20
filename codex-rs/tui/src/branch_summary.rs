@@ -881,7 +881,14 @@ mod tests {
     }
 
     fn command(argv: &[&str]) -> Vec<String> {
-        argv.iter().map(|arg| (*arg).to_string()).collect()
+        let mut argv = argv.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        if argv.first().map(String::as_str) == Some("git") {
+            argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
+        argv
     }
 
     fn response(argv: &[&str], exit_code: i32, stdout: &str) -> FakeResponse {
