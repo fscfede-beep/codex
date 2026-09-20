@@ -486,6 +486,55 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
+    #[cfg(windows)]
+    use std::fs;
+    #[cfg(windows)]
+    use std::process::Command as ProcessCommand;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn branch_diff_stats_does_not_execute_repository_ssh_command() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        fs::create_dir(&repo).expect("create repository");
+        run_git(&repo, &["init", "-q", "--initial-branch=main"]);
+        fs::write(repo.join("file.txt"), "content\n").expect("write file");
+        run_git(&repo, &["add", "file.txt"]);
+        commit_all(&repo, "initial");
+
+        let marker = temp_dir.path().join("ssh-marker.txt");
+        let canary = temp_dir.path().join("ssh-canary.cmd");
+        let script = format!(
+            "@echo off\r\necho CODEX_SSH_CANARY_EXECUTED>>"{}"\r\nexit /b 0\r\n",
+            marker.display()
+        );
+        fs::write(&canary, script).expect("write SSH canary");
+
+        run_git(
+            &repo,
+            &[
+                "config",
+                "core.sshCommand",
+                &canary.to_string_lossy(),
+            ],
+        );
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://127.0.0.1:9/example/repo.git",
+            ],
+        );
+
+        let stats = branch_diff_stats_to_default_branch(&LocalRunner, &repo).await;
+        assert!(stats.is_some(), "local main fallback should remain available");
+        assert!(
+            !marker.exists(),
+            "background branch metadata must not execute repository-controlled core.sshCommand"
+        );
+    }
 
     #[tokio::test]
     async fn branch_diff_stats_prefers_remote_default_ref_over_stale_local_branch() {
@@ -785,5 +834,37 @@ mod tests {
                 Ok(response.output)
             })
         }
-    }
+    
+#[cfg(windows)]
+fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run Git command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[cfg(windows)]
+fn commit_all(cwd: &Path, message: &str) {
+    run_git(
+        cwd,
+        &[
+            "-c",
+            "user.name=Codex Test",
+            "-c",
+            "user.email=codex@example.com",
+            "commit",
+            "-qam",
+            message,
+        ],
+    );
+}
+}
 }
