@@ -435,8 +435,10 @@ async fn run_git_command(
     cwd: &Path,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
+    let mut argv = Vec::with_capacity(args.len() + 3);
     argv.push("git".to_string());
+    argv.push("-c".to_string());
+    argv.push("core.sshCommand=".to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
@@ -550,6 +552,51 @@ mod tests {
             (stats, helper.with_extension("sh.ran").exists()),
             (None, false),
             "local-only branch stats must fail without invoking the promisor transport"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn branch_diff_stats_does_not_execute_repository_ssh_command() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        run_git(&repo, &["init", "-q", "--initial-branch=main"]);
+        std::fs::write(repo.join("file.txt"), "content\n").expect("write file");
+        run_git(&repo, &["add", "file.txt"]);
+        commit_all(&repo, "initial");
+
+        let marker = temp_dir.path().join("ssh-marker.txt");
+        let canary = temp_dir.path().join("ssh-canary.cmd");
+        let script = format!(
+            "@echo off\r\necho CODEX_SSH_CANARY_EXECUTED>>\"{}\"\r\nexit /b 0\r\n",
+            marker.display()
+        );
+        std::fs::write(&canary, script).expect("write SSH canary");
+
+        run_git(
+            &repo,
+            &[
+                "config",
+                "core.sshCommand",
+                &canary.to_string_lossy(),
+            ],
+        );
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "ssh://127.0.0.1:9/example/repo.git",
+            ],
+        );
+
+        let stats = branch_diff_stats_to_default_branch(&LocalRunner, &repo).await;
+        assert!(stats.is_some(), "local main fallback should remain available");
+        assert!(
+            !marker.exists(),
+            "background branch metadata must not execute repository-controlled core.sshCommand"
         );
     }
 
@@ -881,7 +928,14 @@ mod tests {
     }
 
     fn command(argv: &[&str]) -> Vec<String> {
-        argv.iter().map(|arg| (*arg).to_string()).collect()
+        let mut argv = argv.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        if argv.first().map(String::as_str) == Some("git") {
+            argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
+        argv
     }
 
     fn response(argv: &[&str], exit_code: i32, stdout: &str) -> FakeResponse {
@@ -954,6 +1008,78 @@ mod tests {
                 Ok(response.output)
             })
         }
+    }
+
+    #[cfg(windows)]
+    struct LocalRunner;
+
+    #[cfg(windows)]
+    impl WorkspaceCommandExecutor for LocalRunner {
+        fn run(
+            &self,
+            command: WorkspaceCommand,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let mut process = std::process::Command::new(&command.argv[0]);
+                process
+                    .args(&command.argv[1..])
+                    .current_dir(command.cwd.expect("test command cwd"));
+                for (key, value) in command.env {
+                    match value {
+                        Some(value) => {
+                            process.env(key, value);
+                        }
+                        None => {
+                            process.env_remove(key);
+                        }
+                    }
+                }
+                let output = process.output().expect("run test command");
+                Ok(WorkspaceCommandOutput {
+                    exit_code: output.status.code().expect("test command exit code"),
+                    stdout: String::from_utf8(output.stdout).expect("utf8 stdout"),
+                    stderr: String::from_utf8(output.stderr).expect("utf8 stderr"),
+                })
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run Git command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[cfg(windows)]
+    fn commit_all(cwd: &Path, message: &str) {
+        run_git(
+            cwd,
+            &[
+                "-c",
+                "user.name=Codex Test",
+                "-c",
+                "user.email=codex@example.com",
+                "commit",
+                "-qam",
+                message,
+            ],
+        );
     }
 
     #[cfg(unix)]
