@@ -946,6 +946,105 @@ mod tests {
         assert_eq!(get_default_branch(&repo).await.as_deref(), Some("main"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_git_runner_blocks_repository_core_ssh_command() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo directory");
+
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize repo");
+        assert!(init.success(), "initialize repo");
+
+        std::fs::write(repo.join("README.md"), "ok\n").expect("write file");
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&repo)
+                .status()
+                .expect("stage file")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Codex Test",
+                    "-c",
+                    "user.email=codex@example.com",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ])
+                .current_dir(&repo)
+                .status()
+                .expect("commit file")
+                .success()
+        );
+
+        let helper = temp_dir.path().join("ssh-canary.sh");
+        let marker = helper.with_extension("sh.marker");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\nprintf 'CODEX_SSH_CANARY_EXECUTED\\n' >> \"$0.marker\"\nexit 1\n",
+        )
+        .expect("write ssh canary");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("read ssh canary metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make ssh canary executable");
+
+        assert!(
+            std::process::Command::new("git")
+                .args(["config", "core.sshCommand", helper.to_str().expect("helper path")])
+                .current_dir(&repo)
+                .status()
+                .expect("configure repository ssh command")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["remote", "add", "origin", "ssh://127.0.0.1:9/repo.git"])
+                .current_dir(&repo)
+                .status()
+                .expect("configure ssh remote")
+                .success()
+        );
+
+        let vulnerable = std::process::Command::new("git")
+            .env_remove("GIT_ALLOW_PROTOCOL")
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .args([
+                "-c",
+                crate::SAFE_BARE_REPOSITORY_CONFIG,
+                "remote",
+                "show",
+                "origin",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("run vulnerable git command");
+        assert!(!vulnerable.success(), "fake remote should fail");
+
+        assert!(marker.exists(), "repository-controlled ssh helper should execute");
+
+        std::fs::remove_file(&marker).expect("clear ssh canary marker");
+
+        let hardened = run_git_command_with_timeout(&["remote", "show", "origin"], &repo)
+            .await
+            .expect("run hardened git command");
+        assert!(!hardened.status.success(), "fake remote should fail");
+        assert!(
+            !marker.exists(),
+            "local-only git runner must not invoke repository-controlled core.sshCommand"
+        );
+    }
+
     /// Fetch remotes must be sanitized before they enter workspace metadata.
     #[test]
     fn parse_git_remote_urls_sanitizes_fetch_credentials() {
