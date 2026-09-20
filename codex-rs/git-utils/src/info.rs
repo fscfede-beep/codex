@@ -938,11 +938,38 @@ mod tests {
             .expect("initialize repo");
         assert!(init.success());
         std::fs::write(repo.join("README.md"), "ok\n").expect("write file");
-        assert!(std::process::Command::new("git").args(["add", "README.md"]).current_dir(&repo).status().expect("stage file").success());
-        assert!(std::process::Command::new("git").args([
-            "-c","user.name=Codex Test","-c","user.email=codex@example.com","commit","-qm","initial",
-        ]).current_dir(&repo).status().expect("commit file").success());
-        assert!(std::process::Command::new("git").args(["remote","add","origin","ssh://127.0.0.1:9/repo.git"]).current_dir(&repo).status().expect("add remote").success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&repo)
+                .status()
+                .expect("stage file")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Codex Test",
+                    "-c",
+                    "user.email=codex@example.com",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ])
+                .current_dir(&repo)
+                .status()
+                .expect("commit file")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["remote", "add", "origin", "ssh://127.0.0.1:9/repo.git"])
+                .current_dir(&repo)
+                .status()
+                .expect("add remote")
+                .success()
+        );
         assert_eq!(get_default_branch(&repo).await.as_deref(), Some("main"));
     }
 
