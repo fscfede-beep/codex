@@ -873,6 +873,65 @@ mod tests {
         assert!(status.success(), "child test process failed: {status}");
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn local_git_metadata_does_not_execute_repository_ssh_command() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+
+        let status = Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize test repository");
+        assert!(status.success(), "initialize test repository");
+
+        let marker = temp_dir.path().join("ssh-marker.txt");
+        let canary = temp_dir.path().join("ssh-canary.cmd");
+        std::fs::write(
+            &canary,
+            format!(
+                "@echo off\r\necho CODEX_GITUTILS_SSH_CANARY>>\"{}\"\r\nexit /b 0\r\n",
+                marker.display()
+            ),
+        )
+        .expect("write SSH canary");
+
+        let status = Command::new("git")
+            .args(["config", "core.sshCommand", canary.to_str().expect("canary path")])
+            .current_dir(&repo)
+            .status()
+            .expect("configure repository SSH command");
+        assert!(status.success(), "configure repository SSH command");
+
+        let status = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "ssh://127.0.0.1:9/example/repo.git",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("configure SSH remote");
+        assert!(status.success(), "configure SSH remote");
+
+        let output = run_git_command_with_timeout_from(
+            Path::new("git"),
+            &["remote", "show", "origin"],
+            &repo,
+            crate::FsmonitorOverride::Disabled,
+        )
+        .await;
+
+        assert!(output.is_some(), "Git command should return a bounded result");
+        assert!(
+            !marker.exists(),
+            "local-only Git metadata must not execute repository-controlled core.sshCommand"
+        );
+    }
+
     #[test]
     fn canonicalize_git_remote_url_normalizes_github_variants() {
         for remote in [
