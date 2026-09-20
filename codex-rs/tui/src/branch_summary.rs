@@ -490,10 +490,6 @@ mod tests {
     #[cfg(windows)]
     use std::process::Command as ProcessCommand;
     use std::sync::Mutex;
-    #[cfg(windows)]
-    use std::fs;
-    #[cfg(windows)]
-    use std::process::Command as ProcessCommand;
 
     #[cfg(windows)]
     #[tokio::test]
