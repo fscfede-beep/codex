@@ -228,3 +228,27 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
         })
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_only_git_neutralizes_repository_ssh_command() {
+        let command = WorkspaceCommand::local_only_git(["git", "status"]);
+
+        assert_eq!(
+            command.argv,
+            vec!["git", "-c", "core.sshCommand=", "status"]
+        );
+        assert_eq!(
+            command.env.get("GIT_ALLOW_PROTOCOL"),
+            Some(&Some(String::new()))
+        );
+        assert_eq!(
+            command.env.get("GIT_NO_LAZY_FETCH"),
+            Some(&Some("1".to_string()))
+        );
+    }
+}
