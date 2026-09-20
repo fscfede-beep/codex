@@ -225,8 +225,7 @@ async fn get_default_branch(
         {
             return Some(branch);
         }
-
-}
+    }
 
     get_default_branch_local(runner, cwd).await
 }
