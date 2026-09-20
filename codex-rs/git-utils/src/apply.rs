@@ -153,6 +153,8 @@ fn run_git(cwd: &Path, git_cfg: &[String], args: &[String]) -> io::Result<(i32, 
     for p in git_cfg {
         cmd.arg(p);
     }
+    // Keep the local-only invariant after optional caller-supplied config.
+    cmd.args(["-c", "core.sshCommand="]);
     for a in args {
         cmd.arg(a);
     }
@@ -166,6 +168,7 @@ fn run_git(cwd: &Path, git_cfg: &[String], args: &[String]) -> io::Result<(i32, 
 fn local_git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command.envs(crate::local_only_git_env());
+    command.args(["-c", "core.sshCommand="]);
     command
 }
 
