@@ -426,6 +426,7 @@ impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
         let mut command = Command::new(self.git);
         command
             .envs(crate::local_only_git_env())
+            .args(["-c", "core.sshCommand="])
             .args(args)
             .current_dir(self.cwd)
             .kill_on_drop(true);
@@ -455,6 +456,7 @@ async fn run_git_command_with_timeout_from(
         // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
         .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
         .args(["-c", fsmonitor.git_config_arg()])
+        .args(["-c", "core.sshCommand="])
         .args(args)
         .current_dir(cwd)
         .kill_on_drop(true);
