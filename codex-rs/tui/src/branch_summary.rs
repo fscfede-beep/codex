@@ -536,6 +536,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_branch_fallback_does_not_query_remote() {
+        let runner = FakeRunner::new(vec![
+            response(&["git", "remote"], /*exit_code*/ 0, "origin\n"),
+            response(
+                &["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                /*exit_code*/ 1,
+                "",
+            ),
+            response(
+                &["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"],
+                /*exit_code*/ 0,
+                "local-main-sha\n",
+            ),
+        ]);
+
+        let branch = get_default_branch(&runner, Path::new("/repo"))
+            .await
+            .expect("default branch");
+
+        assert_eq!(
+            branch,
+            DefaultBranch {
+                merge_ref: "refs/heads/main".to_string(),
+            }
+        );
+        assert!(!runner.saw(&["git", "remote", "show", "origin"]));
+    }
+
+    #[tokio::test]
     async fn open_pull_request_uses_current_branch_view_first() {
         let runner = FakeRunner::new(vec![response(
             &["gh", "pr", "view", "--json", "number,url,state"],
