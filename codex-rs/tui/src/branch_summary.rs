@@ -397,8 +397,7 @@ fn pull_request_from_view_output(stdout: &str) -> Option<StatusLinePullRequest> 
 
 /// Parses the GitHub REST commit-to-PR response and returns the first open PR.
 fn pull_request_from_api_output(stdout: &str) -> Option<StatusLinePullRequest> {
-    serde_json::from_str::<Vec<GhPullRequestApiItem>>(stdout)
-        .ok()?
+    serde_json::from_str::<Vec<GhPullRequestApiItem>>(stdout)        .ok()?
         .into_iter()
         .find(|pull_request| pull_request.state.eq_ignore_ascii_case("open"))
         .map(|pull_request| StatusLinePullRequest {
@@ -798,7 +797,6 @@ mod tests {
         );
         assert!(!runner.saw(&["git", "rev-parse", "HEAD"]));
     }
-
     #[tokio::test]
     async fn open_pull_request_falls_back_to_parent_repo_commit_lookup() {
         let runner = FakeRunner::new(vec![
@@ -881,7 +879,14 @@ mod tests {
     }
 
     fn command(argv: &[&str]) -> Vec<String> {
-        argv.iter().map(|arg| (*arg).to_string()).collect()
+        let mut argv = argv.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        if argv.first().map(String::as_str) == Some("git") {
+            argv.splice(
+                1..1,
+                ["-c".to_string(), "core.sshCommand=".to_string()],
+            );
+        }
+        argv
     }
 
     fn response(argv: &[&str], exit_code: i32, stdout: &str) -> FakeResponse {
