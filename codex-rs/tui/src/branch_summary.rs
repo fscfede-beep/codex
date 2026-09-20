@@ -483,8 +483,12 @@ mod tests {
     use crate::workspace_command::WorkspaceCommand;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
+    #[cfg(windows)]
+    use std::fs;
     use std::future::Future;
     use std::pin::Pin;
+    #[cfg(windows)]
+    use std::process::Command as ProcessCommand;
     use std::sync::Mutex;
     #[cfg(windows)]
     use std::fs;
@@ -834,37 +838,77 @@ mod tests {
                 Ok(response.output)
             })
         }
-    
-#[cfg(windows)]
-fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
-    let output = ProcessCommand::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run Git command");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
+    }
 
-#[cfg(windows)]
-fn commit_all(cwd: &Path, message: &str) {
-    run_git(
-        cwd,
-        &[
-            "-c",
-            "user.name=Codex Test",
-            "-c",
-            "user.email=codex@example.com",
-            "commit",
-            "-qam",
-            message,
-        ],
-    );
-}
-}
+    #[cfg(windows)]
+    struct LocalRunner;
+
+    #[cfg(windows)]
+    impl WorkspaceCommandExecutor for LocalRunner {
+        fn run(
+            &self,
+            command: WorkspaceCommand,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let mut process = ProcessCommand::new(&command.argv[0]);
+                process
+                    .args(&command.argv[1..])
+                    .current_dir(command.cwd.expect("test command cwd"));
+                for (key, value) in command.env {
+                    match value {
+                        Some(value) => {
+                            process.env(key, value);
+                        }
+                        None => {
+                            process.env_remove(key);
+                        }
+                    }
+                }
+                let output = process.output().expect("run test command");
+                Ok(WorkspaceCommandOutput {
+                    exit_code: output.status.code().expect("test command exit code"),
+                    stdout: String::from_utf8(output.stdout).expect("utf8 stdout"),
+                    stderr: String::from_utf8(output.stderr).expect("utf8 stderr"),
+                })
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+        let output = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run Git command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[cfg(windows)]
+    fn commit_all(cwd: &Path, message: &str) {
+        run_git(
+            cwd,
+            &[
+                "-c",
+                "user.name=Codex Test",
+                "-c",
+                "user.email=codex@example.com",
+                "commit",
+                "-qam",
+                message,
+            ],
+        );
+    }
 }
