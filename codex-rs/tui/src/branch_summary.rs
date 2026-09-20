@@ -220,13 +220,9 @@ async fn get_default_branch(
 ) -> Option<DefaultBranch> {
     let remotes = get_git_remotes(runner, cwd).await.unwrap_or_default();
     for remote in remotes {
+        // Background metadata must remain local-only; do not query configured remotes.
         if let Some(branch) =
             get_remote_default_branch_from_symbolic_ref(runner, cwd, &remote).await
-        {
-            return Some(branch);
-        }
-
-        if let Some(branch) = get_remote_default_branch_from_remote_show(runner, cwd, &remote).await
         {
             return Some(branch);
         }
@@ -263,40 +259,6 @@ async fn get_remote_default_branch_from_symbolic_ref(
     Some(DefaultBranch {
         merge_ref: trimmed.to_string(),
     })
-}
-
-/// Parses `git remote show` output to discover a remote's default branch ref.
-///
-/// This is a fallback for repositories where `refs/remotes/<remote>/HEAD` is not configured but
-/// `git remote show` can still report the upstream HEAD branch. The concrete remote-tracking ref
-/// must already exist locally before it is accepted.
-async fn get_remote_default_branch_from_remote_show(
-    runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
-    remote: &str,
-) -> Option<DefaultBranch> {
-    let output = run_git_command(runner, cwd, &["remote", "show", remote])
-        .await
-        .ok()?;
-    if !output.success() {
-        return None;
-    }
-
-    for line in output.stdout.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("HEAD branch:") else {
-            continue;
-        };
-        let name = rest.trim();
-        let remote_ref = format!("refs/remotes/{remote}/{name}");
-        if !name.is_empty() && git_ref_exists(runner, cwd, &remote_ref).await {
-            return Some(DefaultBranch {
-                merge_ref: remote_ref,
-            });
-        }
-    }
-
-    None
 }
 
 /// Falls back to local `main` or `master` when no remote default branch can be found.
@@ -474,16 +436,20 @@ async fn run_git_command(
     cwd: &Path,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
-    let mut argv = Vec::with_capacity(args.len() + 3);
+    let mut argv = Vec::with_capacity(args.len() + 5);
     argv.push("git".to_string());
     argv.push("-c".to_string());
     argv.push(codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string());
+    argv.push("-c".to_string());
+    argv.push("core.sshCommand=".to_string());
     argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(
             WorkspaceCommand::new(argv)
                 .cwd(cwd.to_path_buf())
-                .env("GIT_OPTIONAL_LOCKS", "0"),
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_ALLOW_PROTOCOL", "")
+                .env("GIT_NO_LAZY_FETCH", "1"),
         )
         .await
 }
@@ -515,6 +481,7 @@ mod tests {
     use super::*;
     use crate::workspace_command::WorkspaceCommand;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -568,6 +535,33 @@ mod tests {
             }
         );
         assert!(runner.saw(&["git", "merge-base", "HEAD", "refs/remotes/origin/main"]));
+    }
+
+    #[tokio::test]
+    async fn run_git_command_forces_empty_ssh_command() {
+        let runner = FakeRunner::new(vec![FakeResponse {
+            argv: vec![
+                "git".to_string(),
+                "-c".to_string(),
+                codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                "-c".to_string(),
+                "core.sshCommand=".to_string(),
+                "rev-parse".to_string(),
+                "--git-dir".to_string(),
+            ],
+            output: WorkspaceCommandOutput {
+                exit_code: 0,
+                stdout: ".git\n".to_string(),
+                stderr: String::new(),
+            },
+        }]);
+
+        let output = run_git_command(&runner, Path::new("/repo"), &["rev-parse", "--git-dir"])
+            .await
+            .expect("git command");
+
+        assert!(output.success());
+        assert!(runner.saw_local_only_git(&["git", "rev-parse", "--git-dir"]));
     }
 
     #[tokio::test]
@@ -681,6 +675,8 @@ mod tests {
                 [
                     "-c".to_string(),
                     codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                    "-c".to_string(),
+                    "core.sshCommand=".to_string(),
                 ],
             );
         }
@@ -701,7 +697,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<(Vec<String>, HashMap<String, Option<String>>)>>,
     }
 
     impl FakeRunner {
@@ -713,6 +709,34 @@ mod tests {
         }
 
         fn saw(&self, argv: &[&str]) -> bool {
+            self.normalized_argv(argv)
+                .map(|expected| {
+                    self.seen
+                        .lock()
+                        .expect("seen lock")
+                        .iter()
+                        .any(|(seen, _)| seen == &expected)
+                })
+                .unwrap_or(false)
+        }
+
+        fn saw_local_only_git(&self, argv: &[&str]) -> bool {
+            let Some(expected) = self.normalized_argv(argv) else {
+                return false;
+            };
+            self.seen
+                .lock()
+                .expect("seen lock")
+                .iter()
+                .any(|(seen, env)| {
+                    seen == &expected
+                        && env.get("GIT_ALLOW_PROTOCOL") == Some(&Some(String::new()))
+                        && env.get("GIT_NO_LAZY_FETCH") == Some(&Some("1".to_string()))
+                        && env.get("GIT_OPTIONAL_LOCKS") == Some(&Some("0".to_string()))
+                })
+        }
+
+        fn normalized_argv(&self, argv: &[&str]) -> Option<Vec<String>> {
             let mut argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
             if argv.first().map(String::as_str) == Some("git") {
                 argv.splice(
@@ -720,14 +744,12 @@ mod tests {
                     [
                         "-c".to_string(),
                         codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG.to_string(),
+                        "-c".to_string(),
+                        "core.sshCommand=".to_string(),
                     ],
                 );
             }
-            self.seen
-                .lock()
-                .expect("seen lock")
-                .iter()
-                .any(|seen| seen == &argv)
+            Some(argv)
         }
     }
 
@@ -745,7 +767,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("seen lock")
-                .push(command.argv.clone());
+                .push((command.argv.clone(), command.env.clone()));
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses
