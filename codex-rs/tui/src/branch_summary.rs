@@ -505,7 +505,7 @@ mod tests {
         let marker = temp_dir.path().join("ssh-marker.txt");
         let canary = temp_dir.path().join("ssh-canary.cmd");
         let script = format!(
-            "@echo off\r\necho CODEX_SSH_CANARY_EXECUTED>>"{}"\r\nexit /b 0\r\n",
+            "@echo off\r\necho CODEX_SSH_CANARY_EXECUTED>>\"{}\"\r\nexit /b 0\r\n",
             marker.display()
         );
         fs::write(&canary, script).expect("write SSH canary");
