@@ -53,19 +53,29 @@ def transport_canary():
                     "GIT_TERMINAL_PROMPT": "0"})
         env.pop("GIT_ALLOW_PROTOCOL", None)
         env.pop("GIT_NO_LAZY_FETCH", None)
-        assert run(["git", "init", "-q"], repo, env).returncode == 0
-        assert run(["git", "config", "core.sshCommand", str(helper)], repo, env).returncode == 0
-        assert run(["git", "remote", "add", "origin", "ssh://127.0.0.1:9/repo.git"], repo, env).returncode == 0
+        for args in (["git", "init", "-q"],
+                     ["git", "config", "core.sshCommand", str(helper)],
+                     ["git", "remote", "add", "origin", "ssh://127.0.0.1:9/repo.git"]):
+            if run(args, repo, env).returncode != 0:
+                raise RuntimeError(f"fixture setup failed: {args!r}")
         baseline = run(["git", "-c", "safe.bareRepository=explicit", "remote", "show", "origin"], repo, env)
         baseline_executed = marker.exists()
         marker.unlink(missing_ok=True)
         guarded_env = dict(env, GIT_ALLOW_PROTOCOL="", GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0")
         protected = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.sshCommand=",
                          "remote", "show", "origin"], repo, guarded_env)
+        protocol_only = run(["git", "-c", "safe.bareRepository=explicit",
+                             "remote", "show", "origin"], repo, guarded_env)
+        protocol_blocked = protocol_only.returncode != 0 and not marker.exists()
+        cli_only = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.sshCommand=",
+                        "remote", "show", "origin"], repo, env)
+        cli_blocked = cli_only.returncode != 0 and not marker.exists()
         return {
             "unprotected_helper_executed": baseline_executed and baseline.returncode != 0,
             "guarded_helper_blocked": protected.returncode != 0 and not marker.exists(),
             "guarded_failed_closed": protected.returncode != 0,
+            "protocol_override_independently_blocks_helper": protocol_blocked,
+            "cli_override_independently_blocks_helper": cli_blocked,
             "no_third_party_remote": True,
         }
 
@@ -77,6 +87,8 @@ def main():
     results = transport_canary()
     if args.repo:
         results.update(source_audit(args.repo.resolve()))
+    else:
+        results["source_audit"] = "NOT_RUN (provide --repo with exact checkout)"
     evaluated = [v for v in results.values() if isinstance(v, bool)]
     print(json.dumps({"status": "PASS" if evaluated and all(evaluated) else "FAIL",
                       "checks": results}, indent=2, sort_keys=True))
