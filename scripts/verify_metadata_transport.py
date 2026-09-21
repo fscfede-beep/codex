@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,12 +26,19 @@ def source_audit(repo):
         "policy": repo / "codex-rs/git-utils/src/local_only.rs",
     }
     text = {name: path.read_text(encoding="utf-8") for name, path in paths.items()}
+    # Do not split on the first #[cfg(test)]: these modules have test-only imports
+    # near the top. Require the actual test-module boundary to avoid false PASS.
+    boundary = "\n#[cfg(test)]\nmod tests"
+    if boundary not in text["tui"] or boundary not in text["git_utils"]:
+        raise RuntimeError("cannot locate the production/test boundary; fail closed")
+    tui_code = text["tui"].rsplit(boundary, 1)[0]
+    git_utils_code = text["git_utils"].rsplit(boundary, 1)[0]
     tests = {
-        "tui_no_transport_fallback": 'get_remote_default_branch_from_remote_show' not in text["tui"].split("#[cfg(test)]")[0],
-        "git_utils_no_remote_show": '["remote", "show"' not in text["git_utils"].split("#[cfg(test)]")[0],
-        "tui_applies_local_policy": 'WorkspaceCommand::local_only_git(argv)' in text["tui"],
+        "tui_no_transport_fallback": 'get_remote_default_branch_from_remote_show' not in tui_code,
+        "git_utils_no_remote_show": re.search(r'"remote"\s*,\s*"show"', git_utils_code) is None,
+        "tui_applies_local_policy": 'WorkspaceCommand::local_only_git(argv)' in tui_code,
         "tui_overrides_repo_ssh_command": '"core.sshCommand="' in text["workspace"],
-        "git_utils_applies_local_policy": '.envs(crate::local_only_git_env())' in text["git_utils"],
+        "git_utils_applies_local_policy": '.envs(crate::local_only_git_env())' in git_utils_code,
         "protocol_denied": '("GIT_ALLOW_PROTOCOL", "")' in text["policy"],
         "lazy_fetch_disabled": '("GIT_NO_LAZY_FETCH", "1")' in text["policy"],
     }
