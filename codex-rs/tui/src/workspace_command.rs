@@ -7,8 +7,8 @@
 //! whether the current app-server is embedded or remote.
 //!
 //! Commands sent through this path should not prompt for stdin. Most callers should keep output
-//! bounded so metadata refreshes cannot grow into unbounded background processes; callers that own a
-//! full user-visible payload, such as `/diff`, can explicitly opt out of output capping.
+//! bounded so metadata refreshes cannot grow into unbounded background processes; callers that own
+//! a full user-visible payload, such as `/diff`, can explicitly opt out of output capping.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -96,7 +96,7 @@ impl WorkspaceCommand {
     }
 }
 
-/// Captured result from a completed workspace command.
+/// Captured result from a completed command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceCommandOutput {
     /// Process exit status code reported by app-server.
@@ -157,6 +157,22 @@ pub(crate) trait WorkspaceCommandExecutor: Send + Sync {
     >;
 }
 
+/// Ensure that local-only Git commands also ignore a repository-controlled SSH command.
+/// The transport-denying environment already prevents network access; this is a separate
+/// defense against future changes to transport handling. Explicit fetch commands are untouched.
+fn harden_local_git_argv(
+    mut argv: Vec<String>,
+    env: &HashMap<String, Option<String>>,
+) -> Vec<String> {
+    if argv.first().map(String::as_str) == Some("git")
+        && env.get("GIT_ALLOW_PROTOCOL") == Some(&Some(String::new()))
+        && env.get("GIT_NO_LAZY_FETCH") == Some(&Some("1".to_string()))
+    {
+        argv.splice(1..1, ["-c".to_string(), "core.sshCommand=".to_string()]);
+    }
+    argv
+}
+
 /// Workspace command runner that forwards every request to the active app-server.
 #[derive(Clone)]
 pub(crate) struct AppServerWorkspaceCommandRunner {
@@ -184,6 +200,7 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
     > {
         Box::pin(async move {
             let timeout_ms = i64::try_from(command.timeout.as_millis()).unwrap_or(i64::MAX);
+            let argv = harden_local_git_argv(command.argv, &command.env);
             let env = if command.env.is_empty() {
                 None
             } else {
@@ -194,7 +211,7 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
                 .request_typed(ClientRequest::OneOffCommandExec {
                     request_id: RequestId::String(format!("workspace-command-{}", Uuid::new_v4())),
                     params: CommandExecParams {
-                        command: command.argv,
+                        command: argv,
                         process_id: None,
                         tty: false,
                         stream_stdin: false,
@@ -220,5 +237,28 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
                 stderr: response.stderr,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_git_overrides_repo_ssh_command() {
+        let command = WorkspaceCommand::local_only_git(["git", "remote", "show", "origin"]);
+        assert_eq!(
+            harden_local_git_argv(command.argv, &command.env),
+            ["git", "-c", "core.sshCommand=", "remote", "show", "origin"]
+        );
+    }
+
+    #[test]
+    fn explicit_git_fetch_is_not_rewritten() {
+        let command = WorkspaceCommand::new(["git", "fetch", "origin"]);
+        assert_eq!(
+            harden_local_git_argv(command.argv, &command.env),
+            ["git", "fetch", "origin"]
+        );
     }
 }
